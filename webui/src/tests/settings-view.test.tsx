@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SettingsView } from "@/components/settings/SettingsView";
+import i18n from "@/i18n";
 import { ClientProvider } from "@/providers/ClientProvider";
 import type { SettingsPayload } from "@/lib/types";
 
@@ -1328,6 +1329,63 @@ describe("SettingsView Apps catalog", () => {
       expect(guide.querySelector("span[aria-hidden] img, span[aria-hidden] svg")).not.toBeNull();
     }
     expect(screen.queryByRole("button", { name: "View MoChat settings" })).not.toBeInTheDocument();
+  });
+
+  it("localizes channel names, descriptions, search, and WeChat setup in Simplified Chinese", async () => {
+    await i18n.changeLanguage("zh-CN");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/settings") return jsonResponse(settingsPayload());
+        if (url === "/api/settings/cli-apps") return jsonResponse({ apps: [], installed_count: 0 });
+        if (url === "/api/settings/mcp-presets") return jsonResponse({ presets: [], installed_count: 0 });
+        if (url === "/api/settings/nanobot-features") {
+          return jsonResponse({
+            features: [
+              {
+                name: "weixin",
+                display_name: "WeChat",
+                type: "channel",
+                enabled: false,
+                installed: true,
+                ready: false,
+                status: "not_enabled",
+                configured: false,
+                install_supported: true,
+                requires_restart: true,
+              },
+              {
+                name: "dingtalk",
+                display_name: "DingTalk",
+                type: "channel",
+                enabled: false,
+                installed: true,
+                ready: false,
+                status: "not_enabled",
+                install_supported: true,
+                requires_restart: true,
+              },
+            ],
+            enabled_count: 0,
+          });
+        }
+        return { ok: false, status: 404, json: async () => ({}) } as Response;
+      }),
+    );
+
+    renderSettingsView({ initialSection: "channels" });
+
+    const weixinLabels = await screen.findAllByText("微信");
+    expect(screen.getByText("钉钉")).toBeInTheDocument();
+    expect(screen.getAllByText("通过微信与 nanobot 对话。").length).toBeGreaterThan(0);
+    fireEvent.click(weixinLabels[0].closest("button") as HTMLButtonElement);
+    expect(screen.getByText("微信使用二维码登录，并将账号状态保存在本地。")).toBeInTheDocument();
+    expect(screen.getByText("连接微信")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("搜索渠道"), { target: { value: "微信" } });
+    expect(screen.getAllByText("微信").length).toBeGreaterThan(0);
+    expect(screen.queryByText("钉钉")).not.toBeInTheDocument();
   });
 
   it("uses choices for channel enum and boolean fields", async () => {

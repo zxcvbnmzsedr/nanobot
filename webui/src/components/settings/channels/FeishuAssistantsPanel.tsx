@@ -145,7 +145,7 @@ export function FeishuAssistantsPanel({
           <ChannelLogo feature={feature} showBrandLogos={showBrandLogos} />
           <div className="min-w-0 flex-1">
             <h3 className="truncate text-[18px] font-semibold leading-6 text-foreground">
-              {channelDisplayName(feature)}
+              {channelDisplayName(feature, t)}
             </h3>
             <p className="mt-1 text-[13px] leading-5 text-muted-foreground">
               {feishuAssistantCountLabel(connectedAssistantCount, tx)}
@@ -274,6 +274,7 @@ export function FeishuAssistantsPanel({
                       </summary>
                       <div className="mt-3">
                         <CredentialForm
+                          featureName={feature.name}
                           fields={manualFields}
                           values={fieldValues}
                           visibleSecrets={visibleSecrets}

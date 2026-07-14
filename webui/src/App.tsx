@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { Moon, PanelLeft, ShieldCheck, Sun, X } from "lucide-react";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { DeleteConfirm } from "@/components/DeleteConfirm";
 import { RenameChatDialog } from "@/components/RenameChatDialog";
@@ -519,7 +520,7 @@ function PairingCodePopup({
   );
   const firstRequest = requests[0] ?? null;
   const displayRequest = matchedRequest ?? firstRequest;
-  const expires = formatPairingExpiry(firstRequest?.expires_in_seconds);
+  const expires = formatPairingExpiry(firstRequest?.expires_in_seconds, t);
   const isCompleteCode = normalizedCode.length === 9;
   const showNoMatch = isCompleteCode && !matchedRequest && !busyCode;
 
@@ -768,11 +769,14 @@ function channelLabel(channel: string): string {
   return PAIRING_CHANNEL_PRESENTATION[key]?.label ?? channel;
 }
 
-function formatPairingExpiry(seconds: number | null | undefined): string {
-  if (seconds == null) return "soon";
-  if (seconds <= 0) return "expired";
-  if (seconds < 60) return `${seconds}s`;
-  return `${Math.ceil(seconds / 60)} min`;
+function formatPairingExpiry(
+  seconds: number | null | undefined,
+  t: TFunction,
+): string {
+  if (seconds == null) return t("app.pairing.expirySoon");
+  if (seconds <= 0) return t("app.pairing.expiryExpired");
+  if (seconds < 60) return t("app.pairing.expirySeconds", { count: seconds });
+  return t("app.pairing.expiryMinutes", { count: Math.ceil(seconds / 60) });
 }
 
 export default function App() {
@@ -1863,14 +1867,14 @@ function Shell({
           next.delete(code);
           return next;
         });
-      } catch (e) {
-        setPairingError((e as Error).message);
+      } catch {
+        setPairingError(t("app.pairing.actionFailed"));
         void refreshPairingRequests();
       } finally {
         setPairingBusyCode(null);
       }
     },
-    [refreshPairingRequests, token],
+    [refreshPairingRequests, t, token],
   );
 
   const onDismissPairingRequest = useCallback((code: string) => {

@@ -106,6 +106,7 @@ export function channelValidationCheckIconClass(status: string): string {
 }
 
 export function CredentialForm({
+  featureName,
   fields,
   values,
   configuredFields,
@@ -114,6 +115,7 @@ export function CredentialForm({
   onToggleSecret,
   compact = false,
 }: {
+  featureName: string;
   fields: ChannelConfigField[];
   values: Record<string, string>;
   configuredFields?: Set<string>;
@@ -127,6 +129,15 @@ export function CredentialForm({
   return (
     <div className={cn(compact ? "space-y-2.5" : "mt-3 space-y-2.5")}>
       {fields.map((field) => {
+        const fieldName = field.key.split(".").pop() ?? field.key;
+        const translationBase = `settings.channels.items.${featureName}.fields.${fieldName}`;
+        const label = t(`${translationBase}.label`, { defaultValue: field.label });
+        const placeholder = field.placeholder
+          ? t(`${translationBase}.placeholder`, { defaultValue: field.placeholder })
+          : undefined;
+        const helpText = field.help
+          ? t(`${translationBase}.help`, { defaultValue: field.help })
+          : undefined;
         const visible = Boolean(visibleSecrets[field.key]);
         const value = values[field.key] ?? "";
         const savedSecret = Boolean(field.secret && configuredFields?.has(field.key) && !value.trim());
@@ -135,7 +146,7 @@ export function CredentialForm({
         const selectedOption = channelFieldValue(field, values);
         const header = (
           <span className="flex items-center justify-between gap-2 text-[11px] font-medium text-foreground/85">
-            <span>{field.label}</span>
+            <span>{label}</span>
             {savedSecret ? (
               <span className="font-normal text-muted-foreground">
                 {tx("settings.channels.savedSecret", "Saved")}
@@ -147,9 +158,9 @@ export function CredentialForm({
             ) : null}
           </span>
         );
-        const help = field.help ? (
+        const help = helpText ? (
           <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">
-            {field.help}
+            {helpText}
           </span>
         ) : null;
         if (field.options?.length) {
@@ -158,7 +169,7 @@ export function CredentialForm({
               {header}
               <span
                 role="radiogroup"
-                aria-label={field.label}
+                aria-label={label}
                 className="mt-1 grid rounded-[10px] bg-muted/75 p-0.5 text-[12px] font-medium text-muted-foreground shadow-[inset_0_0_0_1px_rgba(15,23,42,0.035)]"
                 style={{ gridTemplateColumns: `repeat(${field.options.length}, minmax(0, 1fr))` }}
               >
@@ -175,7 +186,9 @@ export function CredentialForm({
                         && "bg-background text-foreground shadow-[0_1px_2px_rgba(15,23,42,0.10),inset_0_0_0_1px_rgba(15,23,42,0.055)]",
                     )}
                   >
-                    {option.label}
+                    {t(`${translationBase}.options.${option.value}`, {
+                      defaultValue: option.label,
+                    })}
                   </button>
                 ))}
               </span>
@@ -188,13 +201,13 @@ export function CredentialForm({
             {header}
             <span className="relative mt-1 block">
               <Input
-                aria-label={field.label}
+                aria-label={label}
                 type={inputType}
                 inputMode={field.inputType === "number" ? "numeric" : undefined}
                 placeholder={
                   savedSecret
                     ? tx("settings.channels.savedSecretPlaceholder", "Saved secret")
-                    : field.placeholder
+                    : placeholder
                 }
                 value={values[field.key] ?? ""}
                 onChange={(event) => onChange(field.key, event.target.value)}

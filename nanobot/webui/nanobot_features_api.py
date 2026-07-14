@@ -14,9 +14,31 @@ from nanobot.webui.http_utils import query_first
 
 QueryParams = dict[str, list[str]]
 
+WEBUI_CHANNEL_NAMES = frozenset({
+    "dingtalk",
+    "email",
+    "feishu",
+    "qq",
+    "websocket",
+    "wecom",
+    "weixin",
+})
+
+
+def _webui_features_only(payload: dict[str, Any]) -> dict[str, Any]:
+    result = dict(payload)
+    features = [
+        feature
+        for feature in payload.get("features", [])
+        if feature.get("type") != "channel" or feature.get("name") in WEBUI_CHANNEL_NAMES
+    ]
+    result["features"] = features
+    result["enabled_count"] = sum(1 for feature in features if feature.get("enabled"))
+    return result
+
 
 def nanobot_features_payload() -> dict[str, Any]:
-    return optional_features_payload()
+    return _webui_features_only(optional_features_payload())
 
 
 def nanobot_features_action(
@@ -30,7 +52,12 @@ def nanobot_features_action(
     if not name:
         raise OptionalFeatureError("missing feature name")
     if action == "enable":
-        return enable_optional_feature(name, allow_install=allow_install, instance_id=instance_id)
+        payload = enable_optional_feature(
+            name,
+            allow_install=allow_install,
+            instance_id=instance_id,
+        )
+        return _webui_features_only(payload)
     if action == "disable":
         if name == "websocket":
             raise OptionalFeatureError(
@@ -38,5 +65,5 @@ def nanobot_features_action(
                 "Use `nanobot plugins disable websocket` from a terminal if you need to disable it.",
                 status=400,
             )
-        return disable_optional_feature(name, instance_id=instance_id)
+        return _webui_features_only(disable_optional_feature(name, instance_id=instance_id))
     raise OptionalFeatureError(f"unknown feature action '{action}'", status=404)

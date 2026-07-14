@@ -38,6 +38,20 @@
     },
     "meta": {
       "description": "Giao diện web nanobot — trò chuyện với workspace nanobot của bạn."
+    },
+    "pairing": {
+      "title": "Ghép đôi người dùng trò chuyện",
+      "description": "Nhập mã ghép đôi hiển thị trong cuộc trò chuyện.",
+      "code": "Mã ghép đôi",
+      "matched": "Đã khớp {{channel}}. Đang kết nối...",
+      "expiresInline": "Mã hết hạn sau {{expires}}.",
+      "queueCount": "{{count}} đang chờ",
+      "noMatch": "Không có yêu cầu đang chờ nào khớp với mã này.",
+      "expirySoon": "sắp hết hạn",
+      "expiryExpired": "đã hết hạn",
+      "expirySeconds": "{{count}} giây",
+      "expiryMinutes": "{{count}} phút",
+      "actionFailed": "Ghép đôi thất bại. Hãy thử lại."
     }
   },
   "sidebar": {
@@ -519,7 +533,117 @@
       "feishuWaiting": "Đang chờ cấp quyền...",
       "feishuConnected": "Feishu đã kết nối.",
       "feishuConnectStopped": "Kết nối đã dừng.",
-      "feishuConnecting": "Đang kết nối..."
+      "feishuConnecting": "Đang kết nối...",
+      "weixinQrAlt": "WeChat login QR code",
+      "weixinScanTitle": "Scan with WeChat",
+      "weixinScanDescription": "Use WeChat on your phone to scan this code. nanobot saves the account state locally after login.",
+      "weixinWaiting": "Waiting for WeChat scan...",
+      "weixinConnected": "WeChat is connected.",
+      "weixinConnectStopped": "WeChat login stopped.",
+      "weixinConnecting": "Connecting...",
+      "items": {
+        "websocket": {
+          "displayName": "WebSocket",
+          "description": "Use nanobot from the local browser workbench.",
+          "requirements": "Local gateway, WebSocket token"
+        },
+        "telegram": {
+          "displayName": "Telegram",
+          "description": "Chat with nanobot from Telegram chats.",
+          "requirements": "Bot token, allowed users, gateway"
+        },
+        "feishu": {
+          "displayName": "Feishu",
+          "description": "Use nanobot from Feishu chats and groups.",
+          "requirements": "Feishu app credentials, event subscription, gateway"
+        },
+        "slack": {
+          "displayName": "Slack",
+          "description": "Use nanobot from Slack workspaces.",
+          "requirements": "Slack app token, bot token, workspace install"
+        },
+        "discord": {
+          "displayName": "Discord",
+          "description": "Use nanobot from Discord servers and DMs.",
+          "requirements": "Discord bot token, permissions, gateway"
+        },
+        "email": {
+          "displayName": "Email",
+          "description": "Let nanobot receive and answer email messages.",
+          "requirements": "IMAP inbox, SMTP sender, app password, explicit consent"
+        },
+        "matrix": {
+          "displayName": "Matrix",
+          "description": "Use nanobot from Matrix rooms.",
+          "requirements": "Homeserver, account token, room access"
+        },
+        "mattermost": {
+          "displayName": "Mattermost",
+          "description": "Use nanobot from Mattermost channels and DMs.",
+          "requirements": "Mattermost server URL, bot token, channel access"
+        },
+        "whatsapp": {
+          "displayName": "WhatsApp",
+          "description": "Use nanobot from WhatsApp conversations.",
+          "requirements": "WhatsApp connection setup and gateway"
+        },
+        "dingtalk": {
+          "displayName": "DingTalk",
+          "description": "Use nanobot from DingTalk groups.",
+          "requirements": "DingTalk app credentials and gateway"
+        },
+        "wecom": {
+          "displayName": "WeCom",
+          "description": "Use nanobot from WeCom work chats.",
+          "requirements": "WeCom app credentials and callback settings"
+        },
+        "weixin": {
+          "displayName": "WeChat",
+          "description": "Use nanobot from WeChat conversations.",
+          "requirements": "WeChat channel setup and gateway",
+          "setup": {
+            "primaryAction": "Connect WeChat",
+            "docsLabel": "Open WeChat setup",
+            "summary": "WeChat signs in with a QR code and saves the account state locally.",
+            "tryIt": "After the QR login finishes, send a WeChat DM to the connected account.",
+            "steps": [
+              "Click Connect and scan the QR code with WeChat.",
+              "Keep the local gateway running while WeChat receives messages.",
+              "Send a direct test message to confirm the account is connected."
+            ]
+          },
+          "fields": {
+            "allowFrom": {
+              "label": "Allowed users",
+              "placeholder": "User IDs, comma separated"
+            },
+            "token": {
+              "label": "Token",
+              "placeholder": "Saved by QR login"
+            }
+          }
+        },
+        "qq": {
+          "displayName": "QQ",
+          "description": "Use nanobot from QQ chats.",
+          "requirements": "QQ bot credentials and gateway"
+        },
+        "signal": {
+          "displayName": "Signal",
+          "description": "Use nanobot from Signal messages.",
+          "requirements": "signal-cli HTTP daemon, phone number, allowlist"
+        },
+        "msteams": {
+          "displayName": "Microsoft Teams",
+          "description": "Use nanobot from Microsoft Teams chats.",
+          "requirements": "Azure bot app credentials, public callback endpoint"
+        },
+        "napcat": {
+          "displayName": "NapCat",
+          "description": "Connect nanobot through a NapCat gateway.",
+          "requirements": "NapCat WebSocket endpoint, optional access token"
+        }
+      }
     },
     "nanobotFeatures": {
       "enabled": "Đã bật",

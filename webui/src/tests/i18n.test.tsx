@@ -140,9 +140,9 @@ const INDEX_HTML = readFileSync(resolve(process.cwd(), "index.html"), "utf8");
 const PREBOOT_SCRIPT = INDEX_HTML.match(
   /<script>\s*(\(function \(\) \{\s*var localeKey = "nanobot\.locale";[\s\S]*?\}\)\(\);)\s*<\/script>/,
 )?.[1];
-const BOOT_COPY_MARKUP = '<span data-boot-copy>Loading nanobot…</span>';
+const BOOT_COPY_MARKUP = '<span data-boot-copy>正在加载 nanobot…</span>';
 
-function runPrebootLocale(storedLocale: string) {
+function runPrebootLocale(storedLocale: string | null) {
   if (!PREBOOT_SCRIPT) throw new Error("Could not find the preboot locale script in index.html");
 
   const documentElement = { lang: "" };
@@ -237,12 +237,22 @@ describe("webui i18n", () => {
     }
   });
 
-  it("defaults to English until the user chooses another language", () => {
+  it("defaults to Simplified Chinese while preserving the user's language choice", () => {
     localStorage.removeItem(LOCALE_STORAGE_KEY);
-    expect(resolveInitialLocale()).toBe("en");
-
-    localStorage.setItem(LOCALE_STORAGE_KEY, "zh-CN");
     expect(resolveInitialLocale()).toBe("zh-CN");
+
+    localStorage.setItem(LOCALE_STORAGE_KEY, "en");
+    expect(resolveInitialLocale()).toBe("en");
+  });
+
+  it("uses Simplified Chinese for the preboot screen without a saved locale", () => {
+    const expected = resources["zh-CN"].common.app;
+
+    expect(runPrebootLocale(null)).toEqual({
+      lang: "zh-CN",
+      boot: expected.loading.boot,
+      description: expected.meta.description,
+    });
   });
 
   it("switches UI copy and document locale through the language switcher", async () => {
@@ -391,6 +401,17 @@ describe("webui i18n", () => {
     expect(settings.byok.tabs.webSearch).toBe("网页搜索");
     expect(settings.overview.webSearch).toBe("网页搜索");
     expect(settings.overview.workspace).toBe("工作区");
+  });
+
+  it("keeps the Simplified Chinese pairing flow localized", () => {
+    const pairing = resources["zh-CN"].common.app.pairing;
+
+    expect(pairing.title).toBe("配对聊天用户");
+    expect(pairing.description).toBe("请输入聊天中显示的配对码。");
+    expect(pairing.code).toBe("配对码");
+    expect(pairing.expiresInline).toBe("配对码有效期：{{expires}}");
+    expect(pairing.expiryMinutes).toBe("{{count}} 分钟");
+    expect(pairing.actionFailed).toBe("配对失败，请重试。");
   });
 
   it("keeps Brazilian Portuguese settings overview copy localized", () => {

@@ -73,7 +73,7 @@ export function ChannelCatalogRow({
     <button
       type="button"
       aria-label={t("settings.channels.selectChannel", {
-        name: channelDisplayName(feature),
+        name: channelDisplayName(feature, t),
         defaultValue: "View {{name}} settings",
       })}
       aria-pressed={selected}
@@ -88,7 +88,7 @@ export function ChannelCatalogRow({
       <ChannelLogo feature={feature} showBrandLogos={showBrandLogos} />
       <div className="min-w-0 flex-1">
         <h3 className="truncate text-[14px] font-semibold leading-5 text-foreground">
-          {channelDisplayName(feature)}
+          {channelDisplayName(feature, t)}
         </h3>
         <p className="mt-0.5 truncate text-[12.5px] leading-5 text-muted-foreground">
           {channelDescription(feature, t)}
@@ -157,7 +157,7 @@ export function ChannelSetupPanel({
     || (!feature.install_supported && !feature.installed && !feature.enabled);
   const installSupportLabel = tx("settings.nanobotFeatures.installSupport", "Install support");
   const toggleAriaLabel = t("settings.channels.toggleChannel", {
-    name: channelDisplayName(feature),
+    name: channelDisplayName(feature, t),
     defaultValue: "{{name}} channel",
   });
 
@@ -168,7 +168,7 @@ export function ChannelSetupPanel({
           <ChannelLogo feature={feature} showBrandLogos={showBrandLogos} />
           <div className="min-w-0 flex-1">
             <h3 className="truncate text-[18px] font-semibold leading-6 text-foreground">
-              {channelDisplayName(feature)}
+              {channelDisplayName(feature, t)}
             </h3>
             <p className="mt-1 text-[13px] leading-5 text-muted-foreground">
               {channelDescription(feature, t)}
@@ -470,6 +470,7 @@ function ChannelSetupSurface({
             ) : null}
             {primaryFields.length ? (
               <CredentialForm
+                featureName={feature.name}
                 fields={primaryFields}
                 values={fieldValues}
                 configuredFields={configuredFields}
@@ -535,6 +536,7 @@ function ChannelSetupSurface({
           {advancedFields.length ? (
             <div className="mt-3">
               <CredentialForm
+                featureName={feature.name}
                 fields={advancedFields}
                 values={fieldValues}
                 configuredFields={configuredFields}

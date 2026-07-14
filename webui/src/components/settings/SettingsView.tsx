@@ -5371,10 +5371,10 @@ function ChannelsSettings({
   const allChannels = (nanobotFeatures?.features ?? [])
     .filter((feature) => feature.type === "channel")
     .filter((feature) => !HIDDEN_WEBUI_CHANNELS.has(feature.name))
-    .filter((feature) => !normalizedQuery || channelSearchText(feature).includes(normalizedQuery))
+    .filter((feature) => !normalizedQuery || channelSearchText(feature, t).includes(normalizedQuery))
     .sort((left, right) => {
       const rank = Number(!left.ready) - Number(!right.ready);
-      return rank || channelDisplayName(left).localeCompare(channelDisplayName(right));
+      return rank || channelDisplayName(left, t).localeCompare(channelDisplayName(right, t));
     });
   const channels = allChannels.filter((feature) => channelMatchesFilter(feature, filter));
   const [selectedChannelName, setSelectedChannelName] = useState<string | null>(null);

@@ -38,6 +38,20 @@
     },
     "meta": {
       "description": "nanobot Web UI —— 与你的 nanobot 工作区对话。"
+    },
+    "pairing": {
+      "title": "配对聊天用户",
+      "description": "请输入聊天中显示的配对码。",
+      "code": "配对码",
+      "matched": "已匹配 {{channel}}，正在连接...",
+      "expiresInline": "配对码有效期：{{expires}}",
+      "queueCount": "{{count}} 个待处理",
+      "noMatch": "没有待处理请求与此配对码匹配。",
+      "expirySoon": "即将过期",
+      "expiryExpired": "已过期",
+      "expirySeconds": "{{count}} 秒",
+      "expiryMinutes": "{{count}} 分钟",
+      "actionFailed": "配对失败，请重试。"
     }
   },
   "sidebar": {
@@ -533,7 +547,117 @@
       "feishuWaiting": "正在等待授权...",
       "feishuConnected": "飞书已连接。",
       "feishuConnectStopped": "连接已停止。",
-      "feishuConnecting": "正在连接..."
+      "feishuConnecting": "正在连接...",
+      "weixinQrAlt": "微信登录二维码",
+      "weixinScanTitle": "使用微信扫码",
+      "weixinScanDescription": "使用手机微信扫描二维码。登录后，nanobot 会将账号状态保存在本地。",
+      "weixinWaiting": "正在等待微信扫码...",
+      "weixinConnected": "微信已连接。",
+      "weixinConnectStopped": "微信登录已停止。",
+      "weixinConnecting": "正在连接...",
+      "items": {
+        "websocket": {
+          "displayName": "WebSocket",
+          "description": "通过本地浏览器工作台使用 nanobot。",
+          "requirements": "本地网关、WebSocket Token"
+        },
+        "telegram": {
+          "displayName": "Telegram",
+          "description": "通过 Telegram 私聊和群聊与 nanobot 对话。",
+          "requirements": "机器人 Token、允许的用户、本地网关"
+        },
+        "feishu": {
+          "displayName": "飞书",
+          "description": "通过飞书私聊和群聊与 nanobot 对话。",
+          "requirements": "飞书应用凭证、事件订阅、本地网关"
+        },
+        "slack": {
+          "displayName": "Slack",
+          "description": "通过 Slack 工作区与 nanobot 对话。",
+          "requirements": "Slack 应用 Token、机器人 Token、工作区安装"
+        },
+        "discord": {
+          "displayName": "Discord",
+          "description": "通过 Discord 服务器和私信与 nanobot 对话。",
+          "requirements": "Discord 机器人 Token、权限、本地网关"
+        },
+        "email": {
+          "displayName": "邮件",
+          "description": "让 nanobot 接收并回复邮件。",
+          "requirements": "IMAP 收件箱、SMTP 发件服务、应用专用密码、明确授权"
+        },
+        "matrix": {
+          "displayName": "Matrix",
+          "description": "通过 Matrix 房间与 nanobot 对话。",
+          "requirements": "主服务器、账号 Token、房间访问权限"
+        },
+        "mattermost": {
+          "displayName": "Mattermost",
+          "description": "通过 Mattermost 频道和私信与 nanobot 对话。",
+          "requirements": "Mattermost 服务器地址、机器人 Token、频道访问权限"
+        },
+        "whatsapp": {
+          "displayName": "WhatsApp",
+          "description": "通过 WhatsApp 与 nanobot 对话。",
+          "requirements": "WhatsApp 连接配置和本地网关"
+        },
+        "dingtalk": {
+          "displayName": "钉钉",
+          "description": "通过钉钉群与 nanobot 对话。",
+          "requirements": "钉钉应用凭证和本地网关"
+        },
+        "wecom": {
+          "displayName": "企业微信",
+          "description": "通过企业微信会话与 nanobot 对话。",
+          "requirements": "企业微信应用凭证和回调配置"
+        },
+        "weixin": {
+          "displayName": "微信",
+          "description": "通过微信与 nanobot 对话。",
+          "requirements": "微信登录和本地网关",
+          "setup": {
+            "primaryAction": "连接微信",
+            "docsLabel": "打开微信配置指南",
+            "summary": "微信使用二维码登录，并将账号状态保存在本地。",
+            "tryIt": "二维码登录完成后，向已连接的账号发送一条微信私聊消息。",
+            "steps": [
+              "点击“连接微信”，然后使用微信扫描二维码。",
+              "微信接收消息期间，请保持本地网关运行。",
+              "发送一条私聊测试消息，确认账号已连接。"
+            ]
+          },
+          "fields": {
+            "allowFrom": {
+              "label": "允许的用户",
+              "placeholder": "用户 ID，多个请用逗号分隔"
+            },
+            "token": {
+              "label": "Token",
+              "placeholder": "由二维码登录保存"
+            }
+          }
+        },
+        "qq": {
+          "displayName": "QQ",
+          "description": "通过 QQ 与 nanobot 对话。",
+          "requirements": "QQ 机器人凭证和本地网关"
+        },
+        "signal": {
+          "displayName": "Signal",
+          "description": "通过 Signal 消息与 nanobot 对话。",
+          "requirements": "signal-cli HTTP 服务、手机号、允许名单"
+        },
+        "msteams": {
+          "displayName": "Microsoft Teams",
+          "description": "通过 Microsoft Teams 会话与 nanobot 对话。",
+          "requirements": "Azure 机器人应用凭证、公开回调地址"
+        },
+        "napcat": {
+          "displayName": "NapCat",
+          "description": "通过 NapCat 网关连接 nanobot。",
+          "requirements": "NapCat WebSocket 地址、可选访问 Token"
+        }
+      }
     },
     "nanobotFeatures": {
       "enabled": "已启用",

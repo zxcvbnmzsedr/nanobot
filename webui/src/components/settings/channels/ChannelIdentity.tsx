@@ -79,14 +79,18 @@ export function ChannelLogo({
   );
 }
 
-export function channelDisplayName(feature: NanobotFeatureInfo): string {
-  return CHANNEL_PRESENTATION[feature.name]?.displayName ?? feature.display_name;
+export function channelDisplayName(
+  feature: NanobotFeatureInfo,
+  t: ReturnType<typeof useTranslation>["t"],
+): string {
+  const fallback = CHANNEL_PRESENTATION[feature.name]?.displayName ?? feature.display_name;
+  return t(`settings.channels.items.${feature.name}.displayName`, { defaultValue: fallback });
 }
 
 export function channelDescription(feature: NanobotFeatureInfo, t: ReturnType<typeof useTranslation>["t"]): string {
   const fallback =
     CHANNEL_PRESENTATION[feature.name]?.description ??
-    `Use nanobot from ${channelDisplayName(feature)}.`;
+    `Use nanobot from ${channelDisplayName(feature, t)}.`;
   return t(`settings.channels.items.${feature.name}.description`, { defaultValue: fallback });
 }
 
@@ -111,9 +115,14 @@ export function channelStatusLabel(
   return tx("settings.values.off", "Off");
 }
 
-export function channelSearchText(feature: NanobotFeatureInfo): string {
+export function channelSearchText(
+  feature: NanobotFeatureInfo,
+  t: ReturnType<typeof useTranslation>["t"],
+): string {
   return [
-    channelDisplayName(feature),
+    channelDisplayName(feature, t),
+    channelDescription(feature, t),
+    channelRequirements(feature, t),
     feature.display_name,
     feature.name,
     feature.status,

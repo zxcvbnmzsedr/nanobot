@@ -617,7 +617,7 @@ async def test_nanobot_feature_routes_require_token_and_enable(
         )
         assert catalog.status_code == 200
         features = {feature["name"]: feature for feature in catalog.json()["features"]}
-        assert features["matrix"]["status"] == "not_enabled"
+        assert set(features) == {"websocket"}
         assert features["websocket"]["enabled"] is True
         assert features["websocket"]["ready"] is True
 
