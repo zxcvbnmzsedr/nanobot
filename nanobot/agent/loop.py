@@ -50,6 +50,7 @@ from nanobot.bus.runtime_events import (
 )
 from nanobot.command import CommandContext, CommandRouter, register_builtin_commands
 from nanobot.config.schema import AgentDefaults, ModelPresetConfig
+from nanobot.identity.principal import IDENTITY_METADATA_KEY
 from nanobot.providers.base import LLMProvider
 from nanobot.providers.factory import ProviderSnapshot
 from nanobot.runtime_context import (
@@ -410,6 +411,7 @@ class AgentLoop:
             get_tool_definitions=self.tools.get_definitions,
             consolidation_ratio=consolidation_ratio,
             unified_session=unified_session,
+            store_for_session=self._memory_store_for_session_key,
         )
         self.auto_compact = AutoCompact(
             sessions=self.sessions,
@@ -423,6 +425,19 @@ class AgentLoop:
         self._current_iteration: int = 0
         self.commands = CommandRouter()
         register_builtin_commands(self.commands)
+
+    def _memory_store_for_session_key(self, session_key: str | None) -> Any:
+        if not session_key:
+            return self.context.memory
+        session = self.sessions.get_or_create(session_key)
+        if not isinstance(session.metadata.get(IDENTITY_METADATA_KEY), Mapping):
+            return self.context.memory
+        scope = self.workspace_scopes.for_turn(
+            channel=session_key.split(":", 1)[0] if ":" in session_key else None,
+            message_metadata=None,
+            session_metadata=session.metadata,
+        )
+        return self.context.memory_for_workspace(scope.project_path)
 
     @classmethod
     def from_config(
@@ -1329,7 +1344,7 @@ class AgentLoop:
         self._save_turn(session, all_msgs, 1 + len(history), turn_latency_ms=latency_ms)
         self._runtime_events().record_turn_latency(key, latency_ms)
         session.enforce_file_cap(
-            on_archive=partial(self.context.memory.raw_archive, session_key=key)
+            on_archive=partial(self._memory_store_for_session_key(key).raw_archive, session_key=key)
         )
         self._clear_runtime_checkpoint(session)
         self.sessions.save(session)
@@ -1699,7 +1714,10 @@ class AgentLoop:
         )
         if not ctx.ephemeral:
             ctx.session.enforce_file_cap(
-                on_archive=partial(self.context.memory.raw_archive, session_key=ctx.session_key)
+                on_archive=partial(
+                    self._memory_store_for_session_key(ctx.session_key).raw_archive,
+                    session_key=ctx.session_key,
+                )
             )
             self._schedule_background(
                 self.consolidator.maybe_consolidate_by_tokens(

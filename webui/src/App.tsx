@@ -27,12 +27,10 @@ import { logoFallbackUrls } from "@/lib/provider-brand";
 import { cn } from "@/lib/utils";
 import {
   BootstrapAuthRequiredError,
-  clearSavedSecret,
-  consumeUrlBootstrapSecret,
+  consumeUrlHandoff,
   deriveWsUrl,
   fetchBootstrap,
-  loadSavedSecret,
-  saveSecret,
+  loginKangaroo,
 } from "@/lib/bootstrap";
 import { displayTitle } from "@/lib/chat-groups";
 import { deriveTitle } from "@/lib/format";
@@ -65,7 +63,7 @@ import { projectNameFromPath } from "@/lib/workspace";
 type BootState =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "auth"; failed?: boolean }
+  | { status: "auth"; message?: string }
   | {
       status: "ready";
       client: NanobotClient;
@@ -347,54 +345,59 @@ function tokenRefreshDelayMs(expiresAt: number): number {
   return Math.max(TOKEN_REFRESH_MIN_DELAY_MS, remaining - margin);
 }
 
-function AuthForm({
-  failed,
-  onSecret,
+function KangarooAuthForm({
+  message,
+  onLogin,
 }: {
-  failed: boolean;
-  onSecret: (secret: string) => void;
+  message?: string;
+  onLogin: (username: string, password: string) => void;
 }) {
   const { t } = useTranslation();
-  const [value, setValue] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const secret = value.trim();
-    if (!secret) return;
+  const handleSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!username.trim() || !password) return;
     setSubmitting(true);
-    onSecret(secret);
+    onLogin(username.trim(), password);
   };
 
   return (
     <div className="flex h-full w-full items-center justify-center px-6">
-      <form
-        onSubmit={handleSubmit}
-        className="flex w-full max-w-sm flex-col gap-4"
-      >
+      <form onSubmit={handleSubmit} className="flex w-full max-w-sm flex-col gap-4">
         <div className="flex flex-col items-center gap-1 text-center">
-          <p className="text-lg font-semibold">{t("app.auth.title")}</p>
-          <p className="text-sm text-muted-foreground">{t("app.auth.hint")}</p>
+          <p className="text-lg font-semibold">{t("app.auth.kangarooTitle")}</p>
+          <p className="text-sm text-muted-foreground">{t("app.auth.kangarooHint")}</p>
         </div>
-        {failed && (
-          <p className="text-center text-sm text-destructive">
-            {t("app.auth.invalid")}
-          </p>
+        {message && (
+          <p className="text-center text-sm text-destructive">{message}</p>
         )}
         <Input
-          type="password"
-          placeholder={t("app.auth.placeholder")}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
+          type="text"
+          inputMode="tel"
+          autoComplete="username"
+          placeholder={t("app.auth.username")}
+          value={username}
+          onChange={(event) => setUsername(event.target.value)}
           disabled={submitting}
           autoFocus
+        />
+        <Input
+          type="password"
+          autoComplete="current-password"
+          placeholder={t("app.auth.kangarooPassword")}
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
+          disabled={submitting}
         />
         <Button
           type="submit"
           className="w-full"
-          disabled={!value.trim() || submitting}
+          disabled={!username.trim() || !password || submitting}
         >
-          {t("app.auth.submit")}
+          {t("app.auth.kangarooSubmit")}
         </Button>
       </form>
     </div>
@@ -782,11 +785,16 @@ function formatPairingExpiry(
 export default function App() {
   const { t } = useTranslation();
   const [state, setState] = useState<BootState>({ status: "loading" });
-  const bootstrapSecretRef = useRef("");
+  const apiTokenRef = useRef("");
 
   const refreshReadyClient = useCallback(
     async (client: NanobotClient, fallbackSurface: RuntimeSurface) => {
-      const boot = await fetchBootstrap("", bootstrapSecretRef.current);
+      const boot = await fetchBootstrap(
+        "",
+        undefined,
+        "",
+        apiTokenRef.current,
+      );
       const url = deriveWsUrl(boot.ws_path, boot.token, boot.ws_url);
       const runtimeSurface = boot.runtime_surface
         ? toRuntimeSurface(boot.runtime_surface)
@@ -809,20 +817,20 @@ export default function App() {
             }
           : current,
       );
+      apiTokenRef.current = boot.api_token;
       return { token: boot.api_token, url };
     },
     [],
   );
 
-  const bootstrapWithSecret = useCallback(
-    (secret: string) => {
+  const bootstrapWithHandoff = useCallback(
+    (handoff: string = "") => {
       let cancelled = false;
       (async () => {
         setState({ status: "loading" });
         try {
-          const boot = await fetchBootstrap("", secret);
+          const boot = await fetchBootstrap("", undefined, handoff);
           if (cancelled) return;
-          if (secret) saveSecret(secret);
           const url = deriveWsUrl(boot.ws_path, boot.token, boot.ws_url);
           const runtimeSurface = toRuntimeSurface(boot.runtime_surface);
           const runtimeHost = createRuntimeHost(runtimeSurface, boot.runtime_capabilities);
@@ -838,7 +846,7 @@ export default function App() {
               }
             },
           });
-          bootstrapSecretRef.current = secret;
+          apiTokenRef.current = boot.api_token;
           client.connect();
           setState({
             status: "ready",
@@ -851,7 +859,7 @@ export default function App() {
         } catch (e) {
           if (cancelled) return;
           if (isBootstrapAuthRequired(e)) {
-            setState({ status: "auth", failed: !!secret });
+            setState({ status: "auth" });
           } else {
             setState({
               status: "error",
@@ -867,6 +875,22 @@ export default function App() {
     [refreshReadyClient],
   );
 
+  const loginWithKangaroo = useCallback(
+    async (username: string, password: string) => {
+      setState({ status: "loading" });
+      try {
+        const login = await loginKangaroo(username, password);
+        bootstrapWithHandoff(login.handoff_code);
+      } catch (error) {
+        setState({
+          status: "auth",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    [bootstrapWithHandoff],
+  );
+
   useEffect(() => {
     if (state.status !== "ready") return;
     const client = state.client;
@@ -875,7 +899,7 @@ export default function App() {
         await refreshReadyClient(client, state.runtimeSurface);
       } catch (e) {
         if (isBootstrapAuthRequired(e)) {
-          setState({ status: "auth", failed: !!bootstrapSecretRef.current });
+          setState({ status: "auth" });
         }
       }
     }, tokenRefreshDelayMs(state.tokenExpiresAt));
@@ -883,9 +907,9 @@ export default function App() {
   }, [refreshReadyClient, state]);
 
   useEffect(() => {
-    const saved = consumeUrlBootstrapSecret() || loadSavedSecret();
-    return bootstrapWithSecret(saved);
-  }, [bootstrapWithSecret]);
+    const handoff = consumeUrlHandoff();
+    return bootstrapWithHandoff(handoff);
+  }, [bootstrapWithHandoff]);
 
   if (state.status === "loading") {
     return (
@@ -904,9 +928,9 @@ export default function App() {
   }
   if (state.status === "auth") {
     return (
-      <AuthForm
-        failed={!!state.failed}
-        onSecret={(s) => bootstrapWithSecret(s)}
+      <KangarooAuthForm
+        message={state.message}
+        onLogin={loginWithKangaroo}
       />
     );
   }
@@ -934,7 +958,7 @@ export default function App() {
     if (state.status === "ready") {
       state.client.close();
     }
-    clearSavedSecret();
+    apiTokenRef.current = "";
     setState({ status: "auth" });
   };
 

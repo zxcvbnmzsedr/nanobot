@@ -15,8 +15,6 @@ import httpx
 import pytest
 import websockets
 
-_BOOTSTRAP_SECRET = "smoke-secret"
-
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -47,7 +45,6 @@ def _write_smoke_config(path: Path, *, workspace: Path, ws_port: int, gateway_po
                 "host": "127.0.0.1",
                 "port": ws_port,
                 "allowFrom": ["*"],
-                "tokenIssueSecret": _BOOTSTRAP_SECRET,
             }
         },
         "gateway": {
@@ -101,7 +98,6 @@ def _get_json(url: str, *, token: str | None = None) -> dict:
 def _get_bootstrap(url: str) -> dict:
     response = httpx.get(
         url,
-        headers={"X-Nanobot-Auth": _BOOTSTRAP_SECRET},
         timeout=5.0,
         trust_env=False,
     )

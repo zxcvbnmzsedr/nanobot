@@ -6,7 +6,7 @@ Nanobot can act as a WebSocket server, allowing external clients (web apps, CLIs
 
 - Bidirectional real-time communication over WebSocket
 - Streaming support — receive agent responses token by token
-- Token-based authentication (static tokens and short-lived issued tokens)
+- Kangaroo account authentication with identity-bound, short-lived session tokens
 - Multi-chat multiplexing — one connection can run many concurrent `chat_id`s
 - TLS/SSL support (WSS) with enforced TLSv1.2 minimum
 - Client allow-list via `allowFrom`
@@ -26,8 +26,11 @@ override under `channels.websocket`:
       "host": "127.0.0.1",
       "port": 8765,
       "path": "/",
-      "tokenIssueSecret": "your-webui-password",
       "websocketRequiresToken": true,
+      "kangarooAuth": {
+        "enabled": true,
+        "apiBase": "https://accounts.example.com"
+      },
       "allowFrom": ["*"],
       "streaming": true
     }
@@ -47,25 +50,11 @@ You should see:
 WebSocket server listening on ws://127.0.0.1:8765/
 ```
 
-### 3. Connect a client
+### 3. Connect
 
-```bash
-# Using websocat
-websocat ws://127.0.0.1:8765/?client_id=alice
-
-# Using Python
-import asyncio, json, websockets
-
-async def main():
-    async with websockets.connect("ws://127.0.0.1:8765/?client_id=alice") as ws:
-        ready = json.loads(await ws.recv())
-        print(ready)  # {"event": "ready", "chat_id": "...", "client_id": "alice"}
-        await ws.send(json.dumps({"content": "Hello nanobot!"}))
-        reply = json.loads(await ws.recv())
-        print(reply["text"])
-
-asyncio.run(main())
-```
+Open `http://127.0.0.1:8765` and sign in with a Kangaroo account. The WebUI obtains a one-time
+handoff and exchanges it for identity-bound WebSocket and API tokens. See
+[Kangaroo account authentication](./kangaroo-account-auth.md) for programmatic handoff details.
 
 ## Connection URL
 
@@ -76,7 +65,7 @@ ws://{host}:{port}{path}?client_id={id}&token={token}
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `client_id` | No | Identifier for `allowFrom` authorization. Auto-generated as `anon-xxxxxxxxxxxx` if omitted. Truncated to 128 chars. |
-| `token` | Conditional | Authentication token. Required when `websocketRequiresToken` is `true` or `token` (static secret) is configured. |
+| `token` | Conditional | One-time, short-lived nanobot token returned by authenticated bootstrap. Required when `websocketRequiresToken` is `true`. |
 
 ## Wire Protocol
 
@@ -218,11 +207,9 @@ All fields go under `channels.websocket` in `config.json`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `token` | string | `""` | Static shared secret. When set, clients must provide `?token=<value>` matching this secret (timing-safe comparison). Issued tokens are also accepted as a fallback. |
-| `websocketRequiresToken` | bool | `true` | When `true` and no static `token` is configured, clients must still present a valid issued token. Set to `false` to allow unauthenticated connections (only safe for local/trusted networks). |
-| `tokenIssuePath` | string | `""` | HTTP path for issuing short-lived tokens. Must differ from `path`. See [Token Issuance](#token-issuance). |
-| `tokenIssueSecret` | string | `""` | Secret required to obtain tokens via the issue endpoint. If empty, any client can obtain WebSocket connection tokens from `tokenIssuePath` (logged as a warning). `/webui/bootstrap` still issues WebUI REST API tokens for same-machine localhost browser requests; remote or forwarded bootstrap requires `tokenIssueSecret` or `token`. |
+| `websocketRequiresToken` | bool | `true` | Require a valid short-lived token issued by authenticated bootstrap. Set to `false` only for same-machine development. |
 | `tokenTtlS` | int | `300` | Time-to-live for issued tokens in seconds (30 – 86,400). |
+| `kangarooAuth` | object | disabled | Kangaroo login, identity verification, handoff, and tenant runtime configuration. See [Kangaroo account authentication](./kangaroo-account-auth.md). |
 
 ### Access Control
 
@@ -250,61 +237,22 @@ All fields go under `channels.websocket` in `config.json`.
 | `sslCertfile` | string | `""` | Path to the TLS certificate file (PEM). Both `sslCertfile` and `sslKeyfile` must be set to enable WSS. |
 | `sslKeyfile` | string | `""` | Path to the TLS private key file (PEM). Minimum TLS version is enforced as TLSv1.2. |
 
-## Token Issuance
+## Account Session Tokens
 
-For production deployments where `websocketRequiresToken: true`, use short-lived tokens instead of embedding static secrets in clients.
+Nanobot no longer accepts static gateway keys and no longer exposes a general token-issue route.
+The only remote issuance path starts with a verified Kangaroo identity:
 
-### How it works
-
-1. Client sends `GET {tokenIssuePath}` with `Authorization: Bearer {tokenIssueSecret}` (or `X-Nanobot-Auth` header).
-2. Server responds with a one-time-use token:
-
-```json
-{"token": "nbwt_aBcDeFg...", "expires_in": 300}
-```
-
-3. Client opens WebSocket with `?token=nbwt_aBcDeFg...&client_id=...`.
-4. The token is consumed (single use) and cannot be reused.
-
-The embedded WebUI's `/webui/bootstrap` route also returns a WebSocket token.
-It returns a separate `api_token` for REST routes to same-machine localhost
-browser requests, or after the request proves knowledge of `tokenIssueSecret`
-or the static `token`.
-
-### Example setup
-
-```json
-{
-  "channels": {
-    "websocket": {
-      "port": 8765,
-      "path": "/ws",
-      "tokenIssuePath": "/auth/token",
-      "tokenIssueSecret": "your-secret-here",
-      "tokenTtlS": 300,
-      "websocketRequiresToken": true,
-      "allowFrom": ["*"],
-      "streaming": true
-    }
-  }
-}
-```
-
-Client flow:
-
-```bash
-# 1. Obtain a token
-curl -H "Authorization: Bearer your-secret-here" http://127.0.0.1:8765/auth/token
-
-# 2. Connect using the token
-websocat "ws://127.0.0.1:8765/ws?client_id=alice&token=nbwt_aBcDeFg..."
-```
+1. The account logs in through `/api/auth/login`, or a trusted client submits an existing
+   Kangaroo access token to `/api/auth/exchange`.
+2. Nanobot returns a short-lived, single-use handoff code.
+3. `/webui/bootstrap` consumes the handoff and returns separate WebSocket and REST API tokens.
+4. The WebSocket token is consumed during the handshake and carries the verified `userId/orgId`.
 
 ### Limits
 
 - Issued tokens are single-use — each token can only complete one handshake.
 - Outstanding tokens are capped at 10,000. Requests beyond this return HTTP 429.
-- Expired tokens are purged lazily on each issue or validation request.
+- Expired tokens are purged lazily on issuance or validation.
 
 ## Multi-chat multiplexing
 
@@ -346,13 +294,13 @@ Legacy clients that only send plain text or `{"content": ...}` keep working unch
 
 ### Security boundary
 
-`chat_id` is a *capability*: anyone holding a valid WebSocket auth credential and the chat_id can attach to that conversation and see its output. This is safe for nanobot's local, single-user model. Multi-tenant deployments should namespace chat_ids per user (or introduce a per-tenant auth gate) — nanobot does not do this today.
+Account runtimes namespace and validate chat IDs against the verified Kangaroo principal. A caller
+cannot use another account's chat ID to attach to its conversation.
 
 ## Security Notes
 
-- **Timing-safe comparison**: Static token validation uses `hmac.compare_digest` to prevent timing attacks.
 - **Defense in depth**: `allowFrom` is checked at both the HTTP handshake level and the message level.
-- **chat_id as capability**: see [Multi-chat multiplexing](#multi-chat-multiplexing). Auth on the WebSocket handshake is the single line of defense; callers who pass it can attach to any chat_id they know.
+- **Tenant ownership**: account WebSocket and REST requests are bound to server-verified `userId/orgId` values.
 - **TLS enforcement**: When SSL is enabled, TLSv1.2 is the minimum allowed version.
 - **Default-secure**: `websocketRequiresToken` defaults to `true`. Explicitly set it to `false` only on trusted networks.
 
@@ -365,13 +313,13 @@ Outbound `message` events may include a `media` field containing local filesyste
 
 ## Common Patterns
 
-### Trusted local network (no auth)
+### Same-machine development (no account login)
 
 ```json
 {
   "channels": {
     "websocket": {
-      "host": "0.0.0.0",
+      "host": "127.0.0.1",
       "port": 8765,
       "websocketRequiresToken": false,
       "allowFrom": ["*"],
@@ -381,22 +329,7 @@ Outbound `message` events may include a `media` field containing local filesyste
 }
 ```
 
-### Static token (simple auth)
-
-```json
-{
-  "channels": {
-    "websocket": {
-      "token": "my-shared-secret",
-      "allowFrom": ["alice", "bob"]
-    }
-  }
-}
-```
-
-Clients connect with `?token=my-shared-secret&client_id=alice`.
-
-### Public endpoint with issued tokens
+### Public endpoint with Kangaroo accounts
 
 ```json
 {
@@ -405,9 +338,11 @@ Clients connect with `?token=my-shared-secret&client_id=alice`.
       "host": "0.0.0.0",
       "port": 8765,
       "path": "/ws",
-      "tokenIssuePath": "/auth/token",
-      "tokenIssueSecret": "production-secret",
       "websocketRequiresToken": true,
+      "kangarooAuth": {
+        "enabled": true,
+        "apiBase": "https://accounts.example.com"
+      },
       "sslCertfile": "/etc/ssl/certs/server.pem",
       "sslKeyfile": "/etc/ssl/private/server-key.pem",
       "allowFrom": ["*"]

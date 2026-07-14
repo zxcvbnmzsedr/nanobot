@@ -12,7 +12,7 @@ Check these once before Docker, systemd, or LaunchAgent:
 | `nanobot agent -m "Hello!"` works | Proves install, config, provider, model, and workspace writes before adding a service layer |
 | Secrets are in environment variables or protected config files | API keys, bot tokens, OAuth state, and chat credentials should not be world-readable |
 | `~/.nanobot/` or your custom config/workspace path is persistent | Sessions, memory, channel login state, generated artifacts, and cron jobs live there |
-| Channel access control is intentional | Use `allowFrom`, pairing, WebSocket `token`/`tokenIssueSecret`, or private test channels before exposing the bot |
+| Channel access control is intentional | Use `allowFrom`, pairing, Kangaroo WebUI authentication, or private test channels before exposing the bot |
 | Ports are planned | Gateway health defaults to local-only `127.0.0.1:18790`; WebUI/WebSocket defaults to `8765`; `nanobot serve` defaults to `8900` |
 | Logs are easy to reach | Use `docker compose logs`, `journalctl`, LaunchAgent log files, or `nanobot gateway --verbose` while diagnosing startup |
 
@@ -38,7 +38,7 @@ Restart the deployed process after editing `config.json`. Long-running processes
 > Official Docker usage currently means building from this repository with the included `Dockerfile`. Docker Hub images under third-party namespaces are not maintained or verified by HKUDS/nanobot; do not mount API keys or bot tokens into them unless you trust the publisher.
 
 > [!IMPORTANT]
-> The gateway and WebSocket channel default to `host: "127.0.0.1"` in `config.json` (set in `nanobot/config/schema.py`). Docker `-p` port forwarding cannot reach a container's loopback interface, so for the host or LAN to reach the exposed ports you must set both binds to `0.0.0.0` in `~/.nanobot/config.json` before starting the container. To serve the bundled WebUI from Docker, bind the WebSocket channel externally and protect bootstrap with a secret:
+> The gateway and WebSocket channel default to `host: "127.0.0.1"` in `config.json` (set in `nanobot/config/schema.py`). Docker `-p` port forwarding cannot reach a container's loopback interface, so for the host or LAN to reach the exposed ports you must set both binds to `0.0.0.0` in `~/.nanobot/config.json` before starting the container. To serve the bundled WebUI from Docker, bind the WebSocket channel externally and enable Kangaroo authentication:
 >
 > ```json
 > {
@@ -47,13 +47,16 @@ Restart the deployed process after editing `config.json`. Long-running processes
 >     "websocket": {
 >       "host": "0.0.0.0",
 >       "port": 8765,
->       "tokenIssueSecret": "your-secret-here"
+>       "kangarooAuth": {
+>         "enabled": true,
+>         "apiBase": "https://accounts.example.com"
+>       }
 >     }
 >   }
 > }
 > ```
 >
-> When the WebSocket `host` is `0.0.0.0`, the channel refuses to start unless `token` or `tokenIssueSecret` is also configured. See [`webui.md#lan-access`](./webui.md#lan-access) for details.
+> When the WebSocket `host` is `0.0.0.0`, the channel refuses to start unless Kangaroo authentication is enabled. See [`webui.md#lan-access`](./webui.md#lan-access) for details.
 > The gateway health route itself is intentionally minimal and unauthenticated. When the
 > container binds it to `0.0.0.0`, publish port `18790` to host loopback only; place any
 > remotely monitored health endpoint behind a firewall or reverse proxy. If another host

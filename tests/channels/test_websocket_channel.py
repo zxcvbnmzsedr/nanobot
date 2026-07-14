@@ -38,9 +38,6 @@ from nanobot.session import webui_turns as wth
 from nanobot.session.manager import SessionManager
 from nanobot.webui.gateway_services import GatewayServices, build_gateway_services
 from nanobot.webui.http_utils import (
-    issue_route_secret_matches as _issue_route_secret_matches,
-)
-from nanobot.webui.http_utils import (
     normalize_config_path as _normalize_config_path,
 )
 from nanobot.webui.http_utils import (
@@ -87,7 +84,6 @@ def _basic_handler(bus: Any, **kw: Any) -> GatewayServices:
         "enabled": True, "allowFrom": ["*"],
         "host": "127.0.0.1", "port": _PORT,
         "path": "/ws", "websocketRequiresToken": False,
-        "tokenIssueSecret": kw.get("token_issue_secret", ""),
     })
     return build_gateway_services(
         config=cfg,
@@ -317,61 +313,12 @@ def test_default_config_includes_safe_bind_and_streaming() -> None:
     assert defaults["host"] == "127.0.0.1"
     assert defaults["streaming"] is True
     assert defaults["allowFrom"] == ["*"]
-    assert defaults.get("tokenIssuePath", "") == ""
 
 
-def test_token_issue_path_must_differ_from_websocket_path() -> None:
-    with pytest.raises(ValueError, match="token_issue_path must differ"):
-        WebSocketConfig(path="/ws", token_issue_path="/ws")
-
-
-def test_issue_route_secret_matches_bearer_and_header() -> None:
-    from websockets.datastructures import Headers
-
-    secret = "my-secret"
-    bearer_headers = Headers([("Authorization", "Bearer my-secret")])
-    assert _issue_route_secret_matches(bearer_headers, secret) is True
-    x_headers = Headers([("X-Nanobot-Auth", "my-secret")])
-    assert _issue_route_secret_matches(x_headers, secret) is True
-    wrong = Headers([("Authorization", "Bearer other")])
-    assert _issue_route_secret_matches(wrong, secret) is False
-
-
-def test_issue_route_secret_matches_empty_secret() -> None:
-    from websockets.datastructures import Headers
-
-    # Empty secret always returns True regardless of headers
-    assert _issue_route_secret_matches(Headers([]), "") is True
-    assert _issue_route_secret_matches(Headers([("Authorization", "Bearer anything")]), "") is True
-
-
-@pytest.mark.asyncio
-async def test_token_issue_route_requires_secret_when_static_token_configured(bus: MagicMock) -> None:
-    port = 29882
-    channel = _ch(
-        bus,
-        port=port,
-        token="static-token",
-        tokenIssuePath="/auth/token",
-        websocketRequiresToken=True,
-    )
-
-    server_task = asyncio.create_task(channel.start())
-    await asyncio.sleep(0.3)
-
-    try:
-        denied = await _http_get(f"http://127.0.0.1:{port}/auth/token")
-        assert denied.status_code == 401
-
-        allowed = await _http_get(
-            f"http://127.0.0.1:{port}/auth/token",
-            headers={"Authorization": "Bearer static-token"},
-        )
-        assert allowed.status_code == 200
-        assert allowed.json()["token"].startswith("nbwt_")
-    finally:
-        await channel.stop()
-        await server_task
+@pytest.mark.parametrize("legacy_key", ["token", "tokenIssuePath", "tokenIssueSecret"])
+def test_gateway_key_auth_config_is_rejected(legacy_key: str) -> None:
+    with pytest.raises(ValueError, match="gateway key authentication has been removed"):
+        WebSocketConfig.model_validate({legacy_key: "legacy-secret"})
 
 
 @pytest.mark.asyncio
@@ -1763,7 +1710,7 @@ async def test_end_to_end_client_receives_ready_and_agent_sees_inbound(bus: Magi
 @pytest.mark.asyncio
 async def test_token_rejects_handshake_when_mismatch(bus: MagicMock) -> None:
     port = 29877
-    channel = _ch(bus, port=port, path="/", token="secret")
+    channel = _ch(bus, port=port, path="/", websocketRequiresToken=True)
 
     server_task = asyncio.create_task(channel.start())
     await asyncio.sleep(0.3)
@@ -1801,51 +1748,6 @@ def test_registry_discovers_websocket_channel() -> None:
 
     cls = load_channel_class("websocket")
     assert cls.name == "websocket"
-
-
-@pytest.mark.asyncio
-async def test_http_route_issues_token_then_websocket_requires_it(bus: MagicMock) -> None:
-    port = 29879
-    channel = _ch(
-        bus, port=port,
-        tokenIssuePath="/auth/token",
-        tokenIssueSecret="route-secret",
-        websocketRequiresToken=True,
-    )
-
-    server_task = asyncio.create_task(channel.start())
-    await asyncio.sleep(0.3)
-
-    try:
-        deny = await _http_get(f"http://127.0.0.1:{port}/auth/token")
-        assert deny.status_code == 401
-
-        issue = await _http_get(
-            f"http://127.0.0.1:{port}/auth/token",
-            headers={"Authorization": "Bearer route-secret"},
-        )
-        assert issue.status_code == 200
-        token = issue.json()["token"]
-        assert token.startswith("nbwt_")
-
-        with pytest.raises(websockets.exceptions.InvalidStatus) as missing_token:
-            async with websockets.connect(f"ws://127.0.0.1:{port}/ws?client_id=x"):
-                pass
-        assert missing_token.value.response.status_code == 401
-
-        uri = f"ws://127.0.0.1:{port}/ws?token={token}&client_id=caller"
-        async with websockets.connect(uri) as client:
-            ready = json.loads(await client.recv())
-            assert ready["event"] == "ready"
-            assert ready["client_id"] == "caller"
-
-        with pytest.raises(websockets.exceptions.InvalidStatus) as reuse:
-            async with websockets.connect(uri):
-                pass
-        assert reuse.value.response.status_code == 401
-    finally:
-        await channel.stop()
-        await server_task
 
 
 @pytest.mark.asyncio
@@ -2207,13 +2109,11 @@ async def test_bootstrap_exposes_native_surface(bus: MagicMock) -> None:
             "host": "127.0.0.1",
             "port": port,
             "path": "/ws",
-            "tokenIssueSecret": "native-secret",
-            "websocketRequiresToken": True,
+            "websocketRequiresToken": False,
         },
         bus,
         gateway=_basic_handler(
             bus,
-            token_issue_secret="native-secret",
             runtime_surface="native",
             runtime_capabilities_overrides={"can_pick_folder": True},
         ),
@@ -2223,10 +2123,7 @@ async def test_bootstrap_exposes_native_surface(bus: MagicMock) -> None:
     await asyncio.sleep(0.3)
 
     try:
-        response = await _http_get(
-            f"http://127.0.0.1:{port}/webui/bootstrap",
-            headers={"X-Nanobot-Auth": "native-secret"},
-        )
+        response = await _http_get(f"http://127.0.0.1:{port}/webui/bootstrap")
         assert response.status_code == 200
         body = response.json()
         assert body["runtime_surface"] == "native"
@@ -2379,33 +2276,6 @@ async def test_end_to_end_server_pushes_streaming_deltas_to_client(bus: MagicMoc
 
 
 @pytest.mark.asyncio
-async def test_token_issue_rejects_when_at_capacity(bus: MagicMock) -> None:
-    port = 29881
-    channel = _ch(bus, port=port, tokenIssuePath="/auth/token", tokenIssueSecret="s")
-
-    server_task = asyncio.create_task(channel.start())
-    await asyncio.sleep(0.3)
-
-    try:
-        # Fill issued tokens to capacity
-        channel.gateway.tokens.issued_tokens = {
-            f"nbwt_fill_{i}": time.monotonic() + 300
-            for i in range(channel.gateway.tokens.max_tokens)
-        }
-
-        resp = await _http_get(
-            f"http://127.0.0.1:{port}/auth/token",
-            headers={"Authorization": "Bearer s"},
-        )
-        assert resp.status_code == 429
-        data = resp.json()
-        assert "error" in data
-    finally:
-        await channel.stop()
-        await server_task
-
-
-@pytest.mark.asyncio
 async def test_allow_from_rejects_unauthorized_client_id(bus: MagicMock) -> None:
     port = 29882
     channel = _ch(bus, port=port, allowFrom=["alice", "bob"])
@@ -2458,37 +2328,6 @@ async def test_non_utf8_binary_frame_ignored(bus: MagicMock) -> None:
             await asyncio.sleep(0.05)
             # publish_inbound should NOT have been called
             bus.publish_inbound.assert_not_awaited()
-    finally:
-        await channel.stop()
-        await server_task
-
-
-@pytest.mark.asyncio
-async def test_static_token_accepts_issued_token_as_fallback(bus: MagicMock) -> None:
-    port = 29885
-    channel = _ch(
-        bus, port=port,
-        token="static-secret",
-        tokenIssuePath="/auth/token",
-        tokenIssueSecret="route-secret",
-    )
-
-    server_task = asyncio.create_task(channel.start())
-    await asyncio.sleep(0.3)
-
-    try:
-        # Get an issued token
-        resp = await _http_get(
-            f"http://127.0.0.1:{port}/auth/token",
-            headers={"Authorization": "Bearer route-secret"},
-        )
-        assert resp.status_code == 200
-        issued_token = resp.json()["token"]
-
-        # Connect using issued token (not the static one)
-        async with websockets.connect(f"ws://127.0.0.1:{port}/ws?token={issued_token}&client_id=caller") as client:
-            ready = json.loads(await client.recv())
-            assert ready["event"] == "ready"
     finally:
         await channel.stop()
         await server_task

@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import websockets
-from ws_test_client import WsTestClient, issue_token, issue_token_ok
+from ws_test_client import WsTestClient
 
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.outbound_events import ProgressEvent
@@ -369,67 +369,10 @@ async def test_disconnected_client_cleanup(bus: MagicMock) -> None:
 # -- Authentication -------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_static_token_accepted(bus: MagicMock) -> None:
-    ch = _ch(bus, 29915, token="secret")
-    t = asyncio.create_task(ch.start())
-    await asyncio.sleep(0.3)
-    try:
-        async with WsTestClient("ws://127.0.0.1:29915/", client_id="a", token="secret") as c:
-            assert (await c.recv_ready()).client_id == "a"
-    finally:
-        await ch.stop()
-        await t
-
-
-@pytest.mark.asyncio
-async def test_static_token_rejected(bus: MagicMock) -> None:
-    ch = _ch(bus, 29916, token="correct")
-    t = asyncio.create_task(ch.start())
-    await asyncio.sleep(0.3)
-    try:
-        with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
-            async with WsTestClient("ws://127.0.0.1:29916/", client_id="b", token="wrong"):
-                pass
-        assert exc.value.response.status_code == 401
-    finally:
-        await ch.stop()
-        await t
-
-
-@pytest.mark.asyncio
-async def test_token_issue_full_flow(bus: MagicMock) -> None:
-    ch = _ch(bus, 29917, path="/ws",
-             tokenIssuePath="/auth/token", tokenIssueSecret="s",
-             websocketRequiresToken=True)
-    t = asyncio.create_task(ch.start())
-    await asyncio.sleep(0.3)
-    try:
-        # no secret -> 401
-        _, status = await issue_token(port=29917, issue_path="/auth/token")
-        assert status == 401
-
-        # with secret -> token
-        token = await issue_token_ok(port=29917, issue_path="/auth/token", secret="s")
-
-        # no token -> 401
-        with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
-            async with WsTestClient("ws://127.0.0.1:29917/ws", client_id="x"):
-                pass
-        assert exc.value.response.status_code == 401
-
-        # valid token -> ok
-        async with WsTestClient("ws://127.0.0.1:29917/ws", client_id="ok", token=token) as c:
-            assert (await c.recv_ready()).client_id == "ok"
-
-        # reuse -> 401
-        with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
-            async with WsTestClient("ws://127.0.0.1:29917/ws", client_id="r", token=token):
-                pass
-        assert exc.value.response.status_code == 401
-    finally:
-        await ch.stop()
-        await t
+@pytest.mark.parametrize("legacy_key", ["token", "tokenIssuePath", "tokenIssueSecret"])
+def test_gateway_key_auth_config_is_rejected(legacy_key: str) -> None:
+    with pytest.raises(ValueError, match="gateway key authentication has been removed"):
+        WebSocketConfig.model_validate({legacy_key: "legacy-secret"})
 
 
 # -- Path routing ---------------------------------------------------------

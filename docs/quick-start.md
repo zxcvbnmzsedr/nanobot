@@ -241,7 +241,7 @@ Start the browser workbench:
 nanobot webui
 ```
 
-`nanobot webui` prepares the local WebSocket channel and WebUI bootstrap secret if needed, starts the gateway, and opens `http://127.0.0.1:8765`. First-run WebUI setup binds to `127.0.0.1` by default, so it is not exposed to your LAN. Use `nanobot webui --background` when you want the gateway to keep running without an open terminal.
+`nanobot webui` prepares the local WebSocket channel, starts the gateway, and opens `http://127.0.0.1:8765`. It does not create a gateway password. First-run WebUI setup binds to `127.0.0.1` by default, so it is not exposed to your LAN; remote access uses Kangaroo account authentication. Use `nanobot webui --background` when you want the gateway to keep running without an open terminal.
 
 ## 6. Test One CLI Message
 

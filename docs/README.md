@@ -108,7 +108,7 @@ If a local `nanobot agent` session can already answer normally, you can also ask
 | Development | [`development.md`](./development.md) | Contributor notes for adding providers and transcription adapters |
 | Memory | [`memory.md`](./memory.md) | Session history, Dream consolidation, memory files, and versioning |
 | Observability | [`configuration.md#langfuse-observability`](./configuration.md#langfuse-observability) | Langfuse tracing setup and required environment variables |
-| WebSocket protocol | [`websocket.md`](./websocket.md) | Custom clients, token issuance, multiplexed chats, media, and protocol events |
+| WebSocket protocol | [`websocket.md`](./websocket.md) | Account sessions, multiplexed chats, media, and protocol events |
 | OpenAI-compatible API | [`openai-api.md`](./openai-api.md) | `/v1/chat/completions`, `/v1/models`, file uploads, and SDK-compatible usage |
 | Python SDK | [`python-sdk.md`](./python-sdk.md) | SDK 101, sessions, streaming, model overrides, runtime helpers, and hooks |
 | Runtime self-inspection | [`my-tool.md`](./my-tool.md) | Inspecting and tuning the current agent run |

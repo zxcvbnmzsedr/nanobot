@@ -10,11 +10,11 @@
       "gatewayHint": "請確認 gateway 已啟動（`nanobot gateway`），並且目前頁面與 gateway 在同一台機器上開啟。"
     },
     "auth": {
-      "title": "需要驗證",
-      "hint": "輸入 gateway 設定中 tokenIssueSecret 配置的密鑰。",
-      "placeholder": "密碼",
-      "submit": "連線",
-      "invalid": "密碼無效，請再試一次。"
+      "kangarooTitle": "登入袋鼠帳號",
+      "kangarooHint": "使用分配給你的袋鼠帳號進入 nanobot。",
+      "username": "帳號或手機號碼",
+      "kangarooPassword": "密碼",
+      "kangarooSubmit": "登入"
     },
     "account": {
       "section": "帳戶",

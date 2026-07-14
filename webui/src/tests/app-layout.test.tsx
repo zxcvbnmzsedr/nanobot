@@ -176,7 +176,7 @@ vi.mock("@/hooks/useTheme", async () => {
 
 vi.mock("@/lib/bootstrap", () => ({
   BootstrapAuthRequiredError: class BootstrapAuthRequiredError extends Error {
-    constructor(message = "bootstrap authentication required") {
+    constructor(message = "Kangaroo account authentication required") {
       super(message);
       this.name = "BootstrapAuthRequiredError";
     }
@@ -188,10 +188,8 @@ vi.mock("@/lib/bootstrap", () => ({
     expires_in: 300,
   }),
   deriveWsUrl: vi.fn(() => "ws://test"),
-  consumeUrlBootstrapSecret: vi.fn(() => ""),
-  loadSavedSecret: vi.fn(() => ""),
-  saveSecret: vi.fn(),
-  clearSavedSecret: vi.fn(),
+  loginKangaroo: vi.fn(),
+  consumeUrlHandoff: vi.fn(() => ""),
 }));
 
 vi.mock("@/lib/nanobot-client", () => {
@@ -227,6 +225,7 @@ import {
   BootstrapAuthRequiredError,
   deriveWsUrl,
   fetchBootstrap,
+  loginKangaroo,
 } from "@/lib/bootstrap";
 import App from "@/App";
 
@@ -258,6 +257,11 @@ describe("App layout", () => {
       expires_in: 300,
     });
     vi.mocked(deriveWsUrl).mockReset().mockReturnValue("ws://test");
+    vi.mocked(loginKangaroo).mockReset().mockResolvedValue({
+      handoff_code: "nbho-code",
+      expires_in: 60,
+      user: { userId: "101", orgId: "9001" },
+    });
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({
@@ -271,46 +275,28 @@ describe("App layout", () => {
     vi.useRealTimers();
   });
 
-  it("shows the auth form without an invalid-password error on first load", async () => {
+  it("shows the native Kangaroo login form and exchanges account credentials", async () => {
     vi.mocked(fetchBootstrap).mockRejectedValueOnce(
-      new Error("bootstrap failed: HTTP 401"),
+      new BootstrapAuthRequiredError("bootstrap failed: HTTP 401"),
     );
 
     render(<App />);
 
-    expect(await screen.findByText("Authentication required")).toBeInTheDocument();
-    expect(screen.queryByText("Invalid password. Try again.")).not.toBeInTheDocument();
-    expect(connectSpy).not.toHaveBeenCalled();
-  });
+    expect(await screen.findByText("Sign in to Kangaroo")).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("Account or phone number"), {
+      target: { value: "13800138000" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Password"), {
+      target: { value: "secret-password" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
 
-  it("shows the auth form when bootstrap does not issue an API token", async () => {
-    vi.mocked(fetchBootstrap).mockRejectedValueOnce(
-      new BootstrapAuthRequiredError(
-        "bootstrap authentication required: missing api_token",
-      ),
-    );
-
-    render(<App />);
-
-    expect(await screen.findByText("Authentication required")).toBeInTheDocument();
-    expect(screen.queryByText("Invalid password. Try again.")).not.toBeInTheDocument();
-    expect(connectSpy).not.toHaveBeenCalled();
-  });
-
-  it("shows an invalid-password error after a submitted password is rejected", async () => {
-    vi.mocked(fetchBootstrap).mockRejectedValue(
-      new Error("bootstrap failed: HTTP 401"),
-    );
-
-    render(<App />);
-
-    const password = await screen.findByPlaceholderText("Password");
-    fireEvent.change(password, { target: { value: "wrong-password" } });
-    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
-
-    expect(await screen.findByText("Invalid password. Try again.")).toBeInTheDocument();
-    expect(fetchBootstrap).toHaveBeenLastCalledWith("", "wrong-password");
-    expect(connectSpy).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(loginKangaroo).toHaveBeenCalledWith("13800138000", "secret-password");
+    });
+    await waitFor(() => {
+      expect(fetchBootstrap).toHaveBeenLastCalledWith("", undefined, "nbho-code");
+    });
   });
 
   it("keeps sidebar layout out of the main thread width contract", async () => {

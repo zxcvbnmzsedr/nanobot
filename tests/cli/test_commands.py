@@ -7,7 +7,6 @@ from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-from urllib.parse import parse_qs, urlparse
 
 import pytest
 from typer.testing import CliRunner
@@ -1748,8 +1747,7 @@ def test_webui_yes_creates_config_and_enables_local_websocket(
     assert websocket["host"] == "127.0.0.1"
     assert websocket["port"] == 8899
     assert websocket["websocketRequiresToken"] is True
-    assert isinstance(websocket["tokenIssueSecret"], str)
-    assert len(websocket["tokenIssueSecret"]) >= 32
+    assert "tokenIssueSecret" not in websocket
     assert data["agents"]["defaults"]["workspace"] == str(workspace)
     assert seen["templates"] == workspace
     assert seen["gateway_kwargs"] == {
@@ -1758,9 +1756,7 @@ def test_webui_yes_creates_config_and_enables_local_websocket(
         "webui_bundle_mode": "auto",
     }
     compact_output = re.sub(r"\s+", " ", _strip_ansi(result.stdout))
-    assert "bootstrap secret was generated" in compact_output
-    assert "channels.websocket.tokenIssueSecret" in compact_output
-    assert "rerun without --no-open" in compact_output
+    assert "bootstrap secret" not in compact_output
     assert "nanobot is running in this terminal" in compact_output
     assert "Press Ctrl+C here to stop nanobot" in compact_output
 
@@ -1843,24 +1839,22 @@ def test_webui_background_starts_runtime_and_opens_browser(monkeypatch, tmp_path
     assert options.workspace == str(workspace.resolve(strict=False))
     opened_url = seen["opened_url"]
     assert isinstance(opened_url, str)
-    assert opened_url.startswith("http://127.0.0.1:8765/#/?bootstrapSecret=")
-    assert "bootstrapSecret=<redacted>" in compact_output
-    assert "bootstrapSecret=" in opened_url
+    assert opened_url == "http://127.0.0.1:8765"
+    assert "bootstrapSecret" not in compact_output
     assert "Closing the browser does not stop channels or automations" in compact_output
     assert "nanobot gateway stop --config" in compact_output
 
 
-def test_open_webui_browser_redacts_bootstrap_secret(monkeypatch, capsys) -> None:
+def test_open_webui_browser_opens_plain_url(monkeypatch, capsys) -> None:
     opened: list[str] = []
-    url = "http://127.0.0.1:8765/#/?bootstrapSecret=super-secret"
+    url = "http://127.0.0.1:8765"
     monkeypatch.setattr("webbrowser.open", lambda value: opened.append(value))
 
     cli_commands._open_webui_browser(url, wait=False)
 
     assert opened == [url]
     output = _strip_ansi(capsys.readouterr().out)
-    assert "bootstrapSecret=<redacted>" in output
-    assert "super-secret" not in output
+    assert url in output
 
 
 def test_webui_background_restarts_when_config_changes_and_gateway_is_running(
@@ -1871,7 +1865,7 @@ def test_webui_background_restarts_when_config_changes_and_gateway_is_running(
 
     config_file = tmp_path / "config.json"
     workspace = tmp_path / "workspace"
-    config_file.write_text("{}")
+    config_file.write_text('{"channels":{"websocket":{"enabled":false}}}')
     seen: dict[str, object] = {}
     _patch_webui_provider_ready(monkeypatch)
     monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
@@ -1938,7 +1932,7 @@ def test_webui_background_restarts_when_config_changes_and_gateway_is_running(
     assert options.workspace == str(workspace.resolve(strict=False))
     opened_url = seen["opened_url"]
     assert isinstance(opened_url, str)
-    assert opened_url.startswith("http://127.0.0.1:8765/#/?bootstrapSecret=")
+    assert opened_url == "http://127.0.0.1:8765"
 
 
 def test_webui_foreground_attaches_to_existing_managed_gateway(monkeypatch, tmp_path: Path) -> None:
@@ -1978,10 +1972,7 @@ def test_webui_foreground_attaches_to_existing_managed_gateway(monkeypatch, tmp_
     assert isinstance(seen["attached_runtime"], _FakeRuntime)
     opened_url = seen["opened_url"]
     assert isinstance(opened_url, str)
-    parsed = urlparse(opened_url)
-    assert f"{parsed.scheme}://{parsed.netloc}" == "http://127.0.0.1:8765"
-    fragment = parsed.fragment.removeprefix("/?")
-    assert parse_qs(fragment).get("bootstrapSecret")
+    assert opened_url == "http://127.0.0.1:8765"
     assert seen["open_kwargs"] == {"wait": False}
 
 

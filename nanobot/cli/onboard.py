@@ -1744,23 +1744,15 @@ def _enable_quick_start_websocket_defaults(config: Config) -> bool:
         f"[{_UI_MUTED}]This lets the browser UI at http://127.0.0.1:8765 connect to nanobot.[/]"
     )
     console.print()
-    while True:
-        answer = _get_questionary().confirm(
-            "Enable WebSocket channel now?",
-            default=True,
-        ).ask()
-        if not answer:
-            console.print(
-                "[yellow]! Quick Start needs the WebSocket channel for the local WebUI[/yellow]"
-            )
-            return False
-        webui_secret = _input_secret("Set a WebUI password")
-        if webui_secret is _BACK_PRESSED:
-            continue
-        if not webui_secret:
-            console.print("[yellow]! WebUI password is required when enabling WebSocket[/yellow]")
-            return False
-        break
+    answer = _get_questionary().confirm(
+        "Enable WebSocket channel now?",
+        default=True,
+    ).ask()
+    if not answer:
+        console.print(
+            "[yellow]! Quick Start needs the WebSocket channel for the local WebUI[/yellow]"
+        )
+        return False
 
     config_cls = _get_channel_config_class("websocket")
     if config_cls is None:
@@ -1771,8 +1763,6 @@ def _enable_quick_start_websocket_defaults(config: Config) -> bool:
     model = config_cls.model_validate(current)
     if hasattr(model, "enabled"):
         setattr(model, "enabled", True)
-    if hasattr(model, "token_issue_secret"):
-        setattr(model, "token_issue_secret", webui_secret)
     if hasattr(model, "websocket_requires_token"):
         setattr(model, "websocket_requires_token", True)
     setattr(config.channels, "websocket", model.model_dump(by_alias=True, exclude_none=True))

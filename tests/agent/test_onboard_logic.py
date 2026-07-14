@@ -1039,7 +1039,7 @@ class TestMainMenuUpdate:
         websocket = getattr(config.channels, "websocket")
         assert websocket["enabled"] is True
         assert websocket["websocketRequiresToken"] is True
-        assert websocket["tokenIssueSecret"] == "webui-secret"
+        assert "tokenIssueSecret" not in websocket
 
     def test_quick_start_provider_menu_escape_returns_back(self, monkeypatch):
         """Esc from the first Quick Start menu should return to the main menu."""
@@ -1370,7 +1370,7 @@ class TestMainMenuUpdate:
         websocket = getattr(config.channels, "websocket")
         assert websocket["enabled"] is True
         assert websocket["websocketRequiresToken"] is True
-        assert websocket["tokenIssueSecret"] == "webui-secret"
+        assert "tokenIssueSecret" not in websocket
 
     def test_quick_start_websocket_step_can_be_declined(self, monkeypatch):
         """Declining WebSocket should stop Quick Start before changing channel config."""
@@ -1394,8 +1394,8 @@ class TestMainMenuUpdate:
         assert onboard_wizard._enable_quick_start_websocket_defaults(config) is False
         assert getattr(config.channels, "websocket", None) is None
 
-    def test_quick_start_websocket_requires_password(self, monkeypatch):
-        """Accepting WebSocket with an empty password should not enable the channel."""
+    def test_quick_start_websocket_does_not_request_gateway_password(self, monkeypatch):
+        """Local WebUI setup no longer depends on gateway-key authentication."""
         config = Config()
 
         class FakePrompt:
@@ -1416,8 +1416,10 @@ class TestMainMenuUpdate:
             ),
         )
 
-        assert onboard_wizard._enable_quick_start_websocket_defaults(config) is False
-        assert getattr(config.channels, "websocket", None) is None
+        assert onboard_wizard._enable_quick_start_websocket_defaults(config) is True
+        websocket = getattr(config.channels, "websocket")
+        assert websocket["enabled"] is True
+        assert "tokenIssueSecret" not in websocket
 
     def test_quick_start_requires_api_key_before_setting_defaults(self, monkeypatch):
         """Quick Start should not create a ready-looking config without an API key."""

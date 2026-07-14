@@ -15,6 +15,7 @@ from nanobot.agent.tools.schema import (
 )
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronJob, CronJobState, CronSchedule
+from nanobot.identity.principal import IDENTITY_METADATA_KEY
 from nanobot.session.keys import UNIFIED_SESSION_KEY
 
 _CRON_PARAMETERS = tool_parameters_schema(
@@ -78,6 +79,18 @@ class CronTool(Tool):
             raw_key if ctx.session_key == UNIFIED_SESSION_KEY else (ctx.session_key or "")
         )
         return session_key, ctx.channel or "", ctx.chat_id or "", dict(ctx.metadata or {})
+
+    @classmethod
+    def _account_session_key(cls) -> str | None:
+        session_key, _, _, metadata = cls._request_route()
+        return session_key if IDENTITY_METADATA_KEY in metadata else None
+
+    @staticmethod
+    def _job_belongs_to_session(job: CronJob, session_key: str) -> bool:
+        key = job.payload.session_key
+        if not key and job.payload.origin_channel and job.payload.origin_chat_id:
+            key = f"{job.payload.origin_channel}:{job.payload.origin_chat_id}"
+        return key == session_key
 
     def set_cron_context(self, active: bool):
         """Mark whether the tool is executing inside a cron job callback."""
@@ -257,6 +270,10 @@ class CronTool(Tool):
 
     def _list_jobs(self) -> str:
         jobs = self._cron.list_jobs()
+        if account_session_key := self._account_session_key():
+            jobs = [
+                job for job in jobs if self._job_belongs_to_session(job, account_session_key)
+            ]
         if not jobs:
             return "No scheduled jobs."
         lines = []
@@ -273,6 +290,10 @@ class CronTool(Tool):
     def _remove_job(self, job_id: str | None) -> str:
         if not job_id:
             return ToolResult.error("Error: job_id is required for remove")
+        job = self._cron.get_job(job_id)
+        if account_session_key := self._account_session_key():
+            if job is None or not self._job_belongs_to_session(job, account_session_key):
+                return f"Job {job_id} not found"
         result = self._cron.remove_job(job_id)
         if result == "removed":
             return f"Removed job {job_id}"

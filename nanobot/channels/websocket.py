@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import re
 import ssl
@@ -33,6 +32,8 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
+from nanobot.identity.principal import IDENTITY_METADATA_KEY, Principal
+from nanobot.identity.runtime import TenantRuntime
 from nanobot.security.workspace_access import (
     WORKSPACE_SCOPE_METADATA_KEY,
     WorkspaceScopeError,
@@ -61,26 +62,64 @@ from nanobot.webui.websocket_logging import websockets_server_logger
 
 # Plain HTTP WebUI routes also run through websockets.process_request.
 _WEBUI_HTTP_OPEN_TIMEOUT_S = 360.0
+_ACCOUNT_BLOCKED_COMMANDS = {
+    "/dream",
+    "/dream-log",
+    "/dream-prompt",
+    "/dream-restore",
+    "/model",
+    "/pairing",
+    "/restart",
+}
+
+
+class KangarooAuthConfig(Base):
+    """Exchange trusted Kangaroo accounts for short-lived gateway credentials."""
+
+    enabled: bool = False
+    api_base: str = ""
+    user_info_path: str = "api/auth/userInfo"
+    exchange_path: str = "/api/auth/exchange"
+    login_path: str = "/api/auth/login"
+    upstream_login_path: str = "api/auth/oauth/login"
+    handoff_ttl_s: int = Field(default=60, ge=10, le=600)
+    request_timeout_s: float = Field(default=10.0, ge=1.0, le=30.0)
+    allowed_user_ids: list[str] = Field(default_factory=list)
+    runtime_root: str = ""
+
+    @field_validator("exchange_path", "login_path")
+    @classmethod
+    def exchange_path_format(cls, value: str) -> str:
+        if not value.startswith("/"):
+            raise ValueError('exchange_path must start with "/"')
+        return _normalize_config_path(value)
+
+    @field_validator("runtime_root")
+    @classmethod
+    def runtime_root_format(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            return ""
+        if "\x00" in value:
+            raise ValueError("runtime_root must not contain NUL bytes")
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            raise ValueError("runtime_root must be an absolute path")
+        return str(path)
+
+    @model_validator(mode="after")
+    def require_api_base_when_enabled(self) -> Self:
+        if self.enabled and not self.api_base.strip():
+            raise ValueError("kangaroo_auth.api_base is required when enabled")
+        return self
 
 
 class WebSocketConfig(Base):
     """WebSocket server channel configuration.
 
     Clients connect with URLs like ``ws://{host}:{port}{path}?client_id=...&token=...``.
-    - ``client_id``: Used for ``allow_from`` authorization; if omitted, a value is generated and logged.
-    - ``token``: If non-empty, the ``token`` query param may match this static secret; short-lived tokens
-      from ``token_issue_path`` are also accepted.
-    - ``token_issue_path``: If non-empty, **GET** (HTTP/1.1) to this path returns JSON
-      ``{"token": "...", "expires_in": <seconds>}``; use ``?token=...`` when opening the WebSocket.
-      Must differ from ``path`` (the WS upgrade path). If the client runs in the **same process** as
-      nanobot and shares the asyncio loop, use a thread or async HTTP client for GET—do not call
-      blocking ``urllib`` or synchronous ``httpx`` from inside a coroutine.
-    - ``token_issue_secret``: If non-empty, token requests must send ``Authorization: Bearer <secret>`` or
-      ``X-Nanobot-Auth: <secret>``.
-    - ``websocket_requires_token``: If True, the handshake must include a valid token (static or issued and not expired).
-    - Each connection has its own session: a unique ``chat_id`` maps to the agent session internally.
-    - ``media`` field in outbound messages contains local filesystem paths; remote clients need a
-      shared filesystem or an HTTP file server to access these files.
+    Short-lived tokens may carry a trusted Kangaroo principal; that principal replaces the
+    caller-provided client ID and fixes the connection to its account runtime.
     """
 
     enabled: bool = True
@@ -88,22 +127,36 @@ class WebSocketConfig(Base):
     port: int = 8765
     unix_socket_path: str = ""
     path: str = "/"
-    token: str = ""
-    token_issue_path: str = ""
-    token_issue_secret: str = ""
     token_ttl_s: int = Field(default=300, ge=30, le=86_400)
     websocket_requires_token: bool = True
     allow_from: list[str] = Field(default_factory=lambda: ["*"])
     streaming: bool = True
     # Default 36 MB, upper 40 MB: supports up to 4 images at ~6 MB each after
-    # client-side Worker normalization (see webui Composer). 4 × 6 MB × 1.37
-    # (base64 overhead) + envelope framing stays under 36 MB; the 40 MB ceiling
-    # leaves a small margin for sender slop without opening a DoS avenue.
+    # client-side Worker normalization (see webui Composer).
     max_message_bytes: int = Field(default=37_748_736, ge=1024, le=41_943_040)
     ping_interval_s: float = Field(default=20.0, ge=5.0, le=300.0)
     ping_timeout_s: float = Field(default=20.0, ge=5.0, le=300.0)
     ssl_certfile: str = ""
     ssl_keyfile: str = ""
+    kangaroo_auth: KangarooAuthConfig = Field(default_factory=KangarooAuthConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_gateway_key_auth(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        legacy_keys = (
+            "token",
+            "tokenIssuePath",
+            "token_issue_path",
+            "tokenIssueSecret",
+            "token_issue_secret",
+        )
+        if any(str(value.get(key) or "").strip() for key in legacy_keys):
+            raise ValueError(
+                "gateway key authentication has been removed; configure kangarooAuth instead"
+            )
+        return value
 
     @field_validator("unix_socket_path")
     @classmethod
@@ -125,33 +178,29 @@ class WebSocketConfig(Base):
             raise ValueError('path must start with "/"')
         return _normalize_config_path(value)
 
-    @field_validator("token_issue_path")
-    @classmethod
-    def token_issue_path_format(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            return ""
-        if not value.startswith("/"):
-            raise ValueError('token_issue_path must start with "/"')
-        return _normalize_config_path(value)
-
     @model_validator(mode="after")
-    def token_issue_path_differs_from_ws_path(self) -> Self:
-        if not self.token_issue_path:
+    def kangaroo_paths_do_not_conflict(self) -> Self:
+        if not self.kangaroo_auth.enabled:
             return self
-        if _normalize_config_path(self.token_issue_path) == _normalize_config_path(self.path):
-            raise ValueError("token_issue_path must differ from path (the WebSocket upgrade path)")
+        if not self.websocket_requires_token:
+            raise ValueError(
+                "websocket_requires_token must be enabled when kangaroo_auth is enabled"
+            )
+        exchange_path = self.kangaroo_auth.exchange_path
+        login_path = self.kangaroo_auth.login_path
+        reserved = {_normalize_config_path(self.path), "/webui/bootstrap"}
+        if exchange_path in reserved or login_path in reserved or login_path == exchange_path:
+            raise ValueError("kangaroo_auth routes conflict with another gateway route")
         return self
 
     @model_validator(mode="after")
     def wildcard_host_requires_auth(self) -> Self:
         if self.host not in ("0.0.0.0", "::"):
             return self
-        if self.token.strip() or self.token_issue_secret.strip():
+        if self.kangaroo_auth.enabled:
             return self
         raise ValueError(
-            "host is 0.0.0.0 (all interfaces) but neither token nor "
-            "token_issue_secret is set — set one to prevent unauthenticated access"
+            "host is exposed on all interfaces but kangaroo_auth is not enabled"
         )
 
 
@@ -294,6 +343,7 @@ class WebSocketChannel(BaseChannel):
         self._conn_chats: dict[Any, set[str]] = {}
         # connection -> default chat_id for legacy frames that omit routing.
         self._conn_default: dict[Any, str] = {}
+        self._conn_principals: dict[Any, Principal] = {}
         self._stop_event: asyncio.Event | None = None
         self._server_task: asyncio.Task[None] | None = None
 
@@ -309,7 +359,43 @@ class WebSocketChannel(BaseChannel):
     # -- Subscription bookkeeping -------------------------------------------
 
     def _workspace_controls_available(self, connection: Any) -> bool:
+        if connection in self._conn_principals:
+            return False
         return self._http_router.workspace_controls_available(connection)
+
+    def _tenant_runtime(self, connection: Any) -> TenantRuntime | None:
+        principal = self._conn_principals.get(connection)
+        return self.gateway.tenant_runtimes.for_principal(principal) if principal else None
+
+    def _new_chat_id(self, connection: Any) -> str:
+        runtime = self._tenant_runtime(connection)
+        return runtime.new_chat_id() if runtime else str(uuid.uuid4())
+
+    def _can_access_chat(self, connection: Any, chat_id: str) -> bool:
+        runtime = self._tenant_runtime(connection)
+        return runtime.owns_chat_id(chat_id) if runtime else True
+
+    def _persist_tenant_identity(self, connection: Any, chat_id: str) -> None:
+        runtime = self._tenant_runtime(connection)
+        sessions = self.gateway.session_manager
+        if runtime is None or sessions is None:
+            return
+        session = sessions.get_or_create(f"websocket:{chat_id}")
+        session.metadata[IDENTITY_METADATA_KEY] = runtime.identity_metadata()
+        sessions.save(session)
+
+    async def _reject_blocked_account_command(
+        self,
+        connection: Any,
+        content: str,
+    ) -> bool:
+        if self._tenant_runtime(connection) is None:
+            return False
+        command = content.strip().split(maxsplit=1)[0].lower()
+        if command not in _ACCOUNT_BLOCKED_COMMANDS:
+            return False
+        await self._send_event(connection, "error", detail="account_command_forbidden")
+        return True
 
     def _attach(self, connection: Any, chat_id: str) -> None:
         """Idempotently subscribe *connection* to *chat_id*."""
@@ -327,6 +413,7 @@ class WebSocketChannel(BaseChannel):
             if not subs:
                 self._subs.pop(cid, None)
         self._conn_default.pop(connection, None)
+        self._conn_principals.pop(connection, None)
 
     async def _maybe_push_active_goal_state(self, chat_id: str) -> None:
         """Replay an active sustained goal from session metadata after *chat_id* is subscribed.
@@ -412,17 +499,12 @@ class WebSocketChannel(BaseChannel):
 
     def _authorize_websocket_handshake(self, connection: Any, query: dict[str, list[str]]) -> Any:
         supplied = _query_first(query, "token")
-        static_token = self.config.token.strip()
-
-        if static_token:
-            if supplied and hmac.compare_digest(supplied, static_token):
-                return None
-            if supplied and self._tokens.take_issued_token_if_valid(supplied):
-                return None
-            return connection.respond(401, "Unauthorized")
 
         if self.config.websocket_requires_token:
-            if supplied and self._tokens.take_issued_token_if_valid(supplied):
+            grant = self._tokens.take_issued_grant_if_valid(supplied)
+            if grant is not None:
+                if grant.principal is not None:
+                    self._conn_principals[connection] = grant.principal
                 return None
             return connection.respond(401, "Unauthorized")
 
@@ -461,19 +543,6 @@ class WebSocketChannel(BaseChannel):
                 else f"{scheme}://{self.config.host}:{self.config.port}{self.config.path}"
             ),
         )
-        if self.config.token_issue_path:
-            self.logger.info(
-                "WebSocket token issue route: {}",
-                (
-                    f"unix:{self.config.unix_socket_path}{_normalize_config_path(self.config.token_issue_path)}"
-                    if self.config.unix_socket_path
-                    else (
-                        f"{scheme}://{self.config.host}:{self.config.port}"
-                        f"{_normalize_config_path(self.config.token_issue_path)}"
-                    )
-                ),
-            )
-
         async def runner() -> None:
             socket_path = self.config.unix_socket_path
             if socket_path:
@@ -523,15 +592,22 @@ class WebSocketChannel(BaseChannel):
         request = connection.request
         path_part = request.path if request else "/"
         _, query = _parse_request_path(path_part)
+        principal = self._conn_principals.get(connection)
         client_id_raw = _query_first(query, "client_id")
-        client_id = client_id_raw.strip() if client_id_raw else ""
+        client_id = f"kangaroo:{principal.user_id}" if principal else (
+            client_id_raw.strip() if client_id_raw else ""
+        )
         if not client_id:
             client_id = f"anon-{uuid.uuid4().hex[:12]}"
         elif len(client_id) > 128:
             self.logger.warning("client_id too long ({} chars), truncating", len(client_id))
             client_id = client_id[:128]
 
-        default_chat_id = str(uuid.uuid4())
+        default_chat_id = self._new_chat_id(connection)
+        tenant_runtime = self._tenant_runtime(connection)
+        if tenant_runtime is not None:
+            self._workspaces.persist_scope(default_chat_id, tenant_runtime.workspace_scope())
+            self._persist_tenant_identity(connection, default_chat_id)
 
         try:
             await connection.send(
@@ -540,6 +616,7 @@ class WebSocketChannel(BaseChannel):
                         "event": "ready",
                         "chat_id": default_chat_id,
                         "client_id": client_id,
+                        **({"identity": principal.public_payload()} if principal else {}),
                     },
                     ensure_ascii=False,
                 )
@@ -565,6 +642,8 @@ class WebSocketChannel(BaseChannel):
                 content = _parse_inbound_payload(raw)
                 if content is None:
                     continue
+                if await self._reject_blocked_account_command(connection, content):
+                    continue
                 # WebSocket already authenticates at handshake time (token),
                 # so pairing is not applicable. Treat as non-DM to avoid
                 # sending pairing codes to an already-authenticated client.
@@ -572,7 +651,14 @@ class WebSocketChannel(BaseChannel):
                     sender_id=client_id,
                     chat_id=default_chat_id,
                     content=content,
-                    metadata={"remote": getattr(connection, "remote_address", None)},
+                    metadata={
+                        "remote": getattr(connection, "remote_address", None),
+                        **(
+                            {IDENTITY_METADATA_KEY: principal.metadata()}
+                            if tenant_runtime
+                            else {}
+                        ),
+                    },
                     is_dm=False,
                 )
         except Exception as e:
@@ -585,6 +671,8 @@ class WebSocketChannel(BaseChannel):
     def _save_envelope_media(
         self,
         media: list[Any],
+        *,
+        media_dir: Path | None = None,
     ) -> tuple[list[str], str | None]:
         """Decode and persist ``media`` items from a ``message`` envelope.
 
@@ -610,7 +698,7 @@ class WebSocketChannel(BaseChannel):
         if video_count > _MAX_VIDEOS_PER_MESSAGE:
             return [], "too_many_videos"
 
-        media_dir = get_media_dir("websocket")
+        media_dir = media_dir or get_media_dir("websocket")
         paths: list[str] = []
 
         def _abort(reason: str) -> tuple[list[str], str]:
@@ -659,8 +747,9 @@ class WebSocketChannel(BaseChannel):
         """Route one typed inbound envelope (``new_chat`` / ``attach`` / ``message``)."""
         t = envelope.get("type")
         if t == "new_chat":
-            new_id = str(uuid.uuid4())
-            scope = await self._workspace_scope_or_error(
+            new_id = self._new_chat_id(connection)
+            runtime = self._tenant_runtime(connection)
+            scope = runtime.workspace_scope() if runtime else await self._workspace_scope_or_error(
                 connection,
                 lambda: self._workspaces.scope_for_new_chat(
                     envelope,
@@ -670,6 +759,7 @@ class WebSocketChannel(BaseChannel):
             if scope is None:
                 return
             self._workspaces.persist_scope(new_id, scope)
+            self._persist_tenant_identity(connection, new_id)
             self._attach(connection, new_id)
             await self._send_event(connection, "attached", chat_id=new_id)
             await self._send_event(
@@ -682,12 +772,19 @@ class WebSocketChannel(BaseChannel):
             await self._hydrate_after_subscribe(new_id)
             return
         if t == "fork_chat":
+            source_id = envelope.get("chat_id") or envelope.get("source_chat_id")
+            if isinstance(source_id, str) and not self._can_access_chat(connection, source_id):
+                await self._send_event(connection, "error", detail="session_forbidden")
+                return
             await handle_webui_fork_chat(self, connection, envelope)
             return
         if t == "attach":
             cid = envelope.get("chat_id")
             if not _is_valid_chat_id(cid):
                 await self._send_event(connection, "error", detail="invalid chat_id")
+                return
+            if not self._can_access_chat(connection, cid):
+                await self._send_event(connection, "error", detail="session_forbidden")
                 return
             self._attach(connection, cid)
             await self._send_event(connection, "attached", chat_id=cid)
@@ -697,6 +794,14 @@ class WebSocketChannel(BaseChannel):
             cid = envelope.get("chat_id")
             if not _is_valid_chat_id(cid):
                 await self._send_event(connection, "error", detail="invalid chat_id")
+                return
+            if not self._can_access_chat(connection, cid):
+                await self._send_event(connection, "error", detail="session_forbidden")
+                return
+            if self._tenant_runtime(connection) is not None:
+                await self._send_event(
+                    connection, "error", detail="workspace_scope_rejected", reason="fixed_account_scope"
+                )
                 return
             scope = await self._workspace_scope_or_error(
                 connection,
@@ -711,6 +816,7 @@ class WebSocketChannel(BaseChannel):
             if scope is None:
                 return
             self._workspaces.persist_scope(cid, scope)
+            self._persist_tenant_identity(connection, cid)
             await self._send_event(
                 connection,
                 "session_updated",
@@ -729,8 +835,13 @@ class WebSocketChannel(BaseChannel):
             if not _is_valid_chat_id(cid):
                 await self._send_event(connection, "error", detail="invalid chat_id")
                 return
+            if not self._can_access_chat(connection, cid):
+                await self._send_event(connection, "error", detail="session_forbidden")
+                return
             if not isinstance(content, str):
                 await self._send_event(connection, "error", detail="missing content")
+                return
+            if await self._reject_blocked_account_command(connection, content):
                 return
 
             raw_media = envelope.get("media")
@@ -742,7 +853,11 @@ class WebSocketChannel(BaseChannel):
                         detail="image_rejected", reason="malformed",
                     )
                     return
-                media_paths, reason = self._save_envelope_media(raw_media)
+                runtime = self._tenant_runtime(connection)
+                media_paths, reason = self._save_envelope_media(
+                    raw_media,
+                    media_dir=runtime.media if runtime else None,
+                )
                 if reason is not None:
                     await self._send_event(
                         connection, "error",
@@ -759,7 +874,8 @@ class WebSocketChannel(BaseChannel):
             await self._hydrate_after_subscribe(cid)
 
             # Resolve after hydration so a concurrent downgrade cannot be overwritten.
-            scope = await self._workspace_scope_or_error(
+            runtime = self._tenant_runtime(connection)
+            scope = runtime.workspace_scope() if runtime else await self._workspace_scope_or_error(
                 connection,
                 lambda: self._workspaces.scope_for_message(
                     envelope,
@@ -773,6 +889,8 @@ class WebSocketChannel(BaseChannel):
                 return
 
             metadata: dict[str, Any] = {"remote": getattr(connection, "remote_address", None)}
+            if runtime is not None:
+                metadata[IDENTITY_METADATA_KEY] = runtime.principal.metadata()
             if envelope.get("webui") is True:
                 metadata["webui"] = True
                 metadata.update(self._transcripts.client_turn_metadata(envelope.get("turn_id")))
@@ -784,6 +902,7 @@ class WebSocketChannel(BaseChannel):
                 metadata["mcp_presets"] = mcp_presets
             metadata[WORKSPACE_SCOPE_METADATA_KEY] = scope.metadata()
             self._workspaces.persist_scope(cid, scope)
+            self._persist_tenant_identity(connection, cid)
             if metadata.get("webui") is True and self.is_allowed(client_id):
                 self._transcripts.append_user_message(
                     cid,
@@ -844,6 +963,7 @@ class WebSocketChannel(BaseChannel):
         self._subs.clear()
         self._conn_chats.clear()
         self._conn_default.clear()
+        self._conn_principals.clear()
         self._tokens.clear()
 
     async def _safe_send_to(self, connection: Any, raw: str, *, label: str = "") -> None:

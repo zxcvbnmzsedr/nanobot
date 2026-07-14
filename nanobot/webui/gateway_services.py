@@ -8,6 +8,10 @@ from typing import Any, Callable
 
 from loguru import logger as default_logger
 
+from nanobot.config.paths import get_data_dir
+from nanobot.identity.handoff import HandoffStore
+from nanobot.identity.kangaroo import KangarooIdentityVerifier
+from nanobot.identity.runtime import TenantRuntimeStore
 from nanobot.webui.gateway_tokens import GatewayTokenStore
 from nanobot.webui.media_gateway import WebUIMediaGateway
 from nanobot.webui.transcript import WebUITranscriptRecorder
@@ -29,6 +33,9 @@ class GatewayServices:
     local_trigger_store: Any | None
     cron_pending_job_ids: Callable[[str], set[str]] | None
     local_trigger_pending_ids: Callable[[str], set[str]] | None
+    handoffs: HandoffStore
+    identity_verifier: KangarooIdentityVerifier | None
+    tenant_runtimes: TenantRuntimeStore
 
 
 def build_gateway_services(
@@ -51,6 +58,25 @@ def build_gateway_services(
     logger: Any = default_logger,
 ) -> GatewayServices:
     tokens = GatewayTokenStore()
+    handoffs = HandoffStore()
+    auth_config = config.kangaroo_auth
+    runtime_root = (
+        Path(auth_config.runtime_root).expanduser()
+        if auth_config.runtime_root.strip()
+        else get_data_dir() / "tenants"
+    )
+    tenant_runtimes = TenantRuntimeStore(runtime_root)
+    identity_verifier = (
+        KangarooIdentityVerifier(
+            api_base=auth_config.api_base,
+            user_info_path=auth_config.user_info_path,
+            login_path=auth_config.upstream_login_path,
+            timeout_s=auth_config.request_timeout_s,
+            allowed_user_ids={str(value).strip() for value in auth_config.allowed_user_ids},
+        )
+        if auth_config.enabled
+        else None
+    )
     media = WebUIMediaGateway(
         workspace_path=workspace_path,
         logger=logger,
@@ -70,6 +96,9 @@ def build_gateway_services(
         runtime_capabilities_overrides=runtime_capabilities_overrides,
         bus=bus,
         tokens=tokens,
+        handoffs=handoffs,
+        identity_verifier=identity_verifier,
+        tenant_runtimes=tenant_runtimes,
         media=media,
         workspaces=workspaces,
         skills_workspace_path=workspace_path,
@@ -92,4 +121,7 @@ def build_gateway_services(
         local_trigger_store=local_trigger_store,
         cron_pending_job_ids=cron_pending_job_ids,
         local_trigger_pending_ids=local_trigger_pending_ids,
+        handoffs=handoffs,
+        identity_verifier=identity_verifier,
+        tenant_runtimes=tenant_runtimes,
     )

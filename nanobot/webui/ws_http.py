@@ -10,6 +10,8 @@ Also houses shared HTTP utility functions used by both this module and
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import mimetypes
 import re
@@ -26,11 +28,15 @@ from websockets.http11 import Response
 from nanobot.command.builtin import builtin_command_palette
 from nanobot.cron.session_turns import is_bound_cron_job
 from nanobot.cron.types import CronJob, CronSchedule
+from nanobot.identity.handoff import HandoffStore
+from nanobot.identity.kangaroo import KangarooIdentityError, KangarooIdentityVerifier
+from nanobot.identity.principal import Principal
+from nanobot.identity.runtime import TenantRuntimeStore
 from nanobot.runtime_context import public_history_messages
 from nanobot.triggers.local_types import LocalTrigger
 from nanobot.utils.subagent_channel_display import scrub_subagent_messages_for_channel
 from nanobot.webui.file_preview import WebUIFilePreviewError, file_preview_payload
-from nanobot.webui.gateway_tokens import GatewayTokenStore, token_response_payload
+from nanobot.webui.gateway_tokens import GatewayTokenStore
 from nanobot.webui.http_utils import (
     case_insensitive_header as _case_insensitive_header,
 )
@@ -51,9 +57,6 @@ from nanobot.webui.http_utils import (
 )
 from nanobot.webui.http_utils import (
     is_localhost as _is_localhost,
-)
-from nanobot.webui.http_utils import (
-    issue_route_secret_matches as _issue_route_secret_matches,
 )
 from nanobot.webui.http_utils import (
     normalize_config_path as _normalize_config_path,
@@ -89,12 +92,41 @@ from nanobot.webui.workspaces import WebUIWorkspaceController
 
 _SLOW_WEBUI_HTTP_LOG_MS = 1_000
 _AUTOMATION_VALUES_HEADER = "X-Nanobot-Automation-Values"
+_LOGIN_ATTEMPT_WINDOW_S = 60.0
+_LOGIN_ATTEMPT_LIMIT = 10
 
 if TYPE_CHECKING:
     from nanobot.bus.queue import MessageBus
     from nanobot.cron.service import CronService
     from nanobot.session.manager import SessionManager
     from nanobot.triggers.local_store import LocalTriggerStore
+
+
+def _no_store_json_response(data: dict[str, Any], *, status: int = 200) -> Response:
+    return _http_response(
+        json.dumps(data, ensure_ascii=False).encode("utf-8"),
+        status=status,
+        content_type="application/json; charset=utf-8",
+        extra_headers=[
+            ("Cache-Control", "no-store"),
+            ("Pragma", "no-cache"),
+        ],
+    )
+
+
+def _basic_credentials(headers: Any) -> tuple[str, str] | None:
+    authorization = _case_insensitive_header(headers, "Authorization")
+    scheme, separator, encoded = authorization.partition(" ")
+    if not separator or scheme.lower() != "basic" or not encoded.strip():
+        return None
+    try:
+        decoded = base64.b64decode(encoded.strip(), validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return None
+    username, separator, password = decoded.partition(":")
+    if not separator:
+        return None
+    return username, password
 
 
 def _decode_api_key(raw_key: str) -> str | None:
@@ -154,6 +186,9 @@ class GatewayHTTPHandler:
         runtime_capabilities_overrides: dict[str, Any] | None,
         bus: MessageBus,
         tokens: GatewayTokenStore,
+        handoffs: HandoffStore,
+        identity_verifier: KangarooIdentityVerifier | None,
+        tenant_runtimes: TenantRuntimeStore,
         media: WebUIMediaGateway,
         workspaces: WebUIWorkspaceController,
         skills_workspace_path: Path,
@@ -171,6 +206,10 @@ class GatewayHTTPHandler:
         self.runtime_model_name = runtime_model_name
         self.bus = bus
         self.tokens = tokens
+        self.handoffs = handoffs
+        self.identity_verifier = identity_verifier
+        self.tenant_runtimes = tenant_runtimes
+        self._login_attempts: dict[str, list[float]] = {}
         self.media = media
         self.workspaces = workspaces
         self.skills_workspace_path = skills_workspace_path
@@ -206,6 +245,18 @@ class GatewayHTTPHandler:
     def check_api_token(self, request: WsRequest) -> bool:
         return self.tokens.check_api_token(request)
 
+    def api_principal(self, request: WsRequest) -> Principal | None:
+        return self.tokens.principal_for_api_request(request)
+
+    def _request_can_access_session(self, request: WsRequest, session_key: str) -> bool:
+        principal = self.api_principal(request)
+        if principal is None:
+            return True
+        if not session_key.startswith("websocket:"):
+            return False
+        runtime = self.tenant_runtimes.for_principal(principal)
+        return runtime.owns_chat_id(session_key.split(":", 1)[1])
+
     # -- Main dispatch ------------------------------------------------------
 
     async def dispatch(self, connection: Any, request: WsRequest) -> Any | None:
@@ -226,15 +277,18 @@ class GatewayHTTPHandler:
         request: WsRequest,
         got: str,
     ) -> Any | None:
-        # Token issue endpoint
-        if self.config.token_issue_path:
-            issue_expected = _normalize_config_path(self.config.token_issue_path)
-            if got == issue_expected:
-                return self._handle_token_issue(connection, request)
-
         # Bootstrap
         if got == "/webui/bootstrap":
             return self._handle_bootstrap(connection, request)
+
+        auth_config = self.config.kangaroo_auth
+        if auth_config.enabled and got == auth_config.login_path:
+            return await self._handle_kangaroo_login(connection, request)
+        if auth_config.enabled and got == auth_config.exchange_path:
+            return await self._handle_kangaroo_exchange(request)
+
+        if self.api_principal(request) is not None and got.startswith("/api/settings/"):
+            return _http_error(403, "Account runtimes cannot modify gateway settings")
 
         # Settings routes (delegated)
         response = await self.settings_routes.dispatch(connection, request, got)
@@ -287,48 +341,122 @@ class GatewayHTTPHandler:
             elapsed_ms,
         )
 
-    # -- Token issue --------------------------------------------------------
-
-    def _handle_token_issue(self, connection: Any, request: Any) -> Any:
-        secret = self.config.token_issue_secret.strip() or self.config.token.strip()
-        if secret:
-            if not _issue_route_secret_matches(request.headers, secret):
-                return connection.respond(401, "Unauthorized")
-        else:
-            self._log.warning(
-                "token_issue_path is set but token_issue_secret is empty; "
-                "any client can obtain connection tokens — set token_issue_secret for production."
-            )
-        if not self.tokens.can_issue():
-            self._log.error(
-                "too many outstanding issued tokens ({}), rejecting issuance",
-                len(self.tokens.issued_tokens),
-            )
-            return _http_json_response({"error": "too many outstanding tokens"}, status=429)
-        token_value = self.tokens.issue_token(self.config.token_ttl_s)
-        return _http_json_response(token_response_payload(token_value, self.config.token_ttl_s))
-
     # -- Bootstrap ----------------------------------------------------------
 
+    def _login_rate_limited(self, connection: Any) -> bool:
+        remote = getattr(connection, "remote_address", None)
+        key = str(remote[0]) if isinstance(remote, tuple) and remote else "unknown"
+        now = time.monotonic()
+        attempts = [
+            timestamp
+            for timestamp in self._login_attempts.get(key, [])
+            if now - timestamp < _LOGIN_ATTEMPT_WINDOW_S
+        ]
+        if len(attempts) >= _LOGIN_ATTEMPT_LIMIT:
+            self._login_attempts[key] = attempts
+            return True
+        attempts.append(now)
+        self._login_attempts[key] = attempts
+        return False
+
+    async def _handle_kangaroo_login(
+        self,
+        connection: Any,
+        request: WsRequest,
+    ) -> Response:
+        if self.identity_verifier is None:
+            return _no_store_json_response(
+                {"error": "袋鼠账号登录未启用。"},
+                status=503,
+            )
+        if self._login_rate_limited(connection):
+            return _no_store_json_response(
+                {"error": "登录尝试过于频繁，请稍后重试。"},
+                status=429,
+            )
+        credentials = _basic_credentials(request.headers)
+        if credentials is None:
+            return _no_store_json_response(
+                {"error": "请输入账号和密码。"},
+                status=401,
+            )
+        try:
+            principal = await self.identity_verifier.login(*credentials)
+            code = self.handoffs.issue(principal, self.config.kangaroo_auth.handoff_ttl_s)
+        except KangarooIdentityError as exc:
+            self._log.info("Kangaroo account login rejected: {}", exc)
+            return _no_store_json_response(
+                {"error": str(exc)},
+                status=exc.http_status,
+            )
+        except OverflowError:
+            return _no_store_json_response(
+                {"error": "当前登录请求过多，请稍后重试。"},
+                status=429,
+            )
+        return _no_store_json_response({
+            "handoff_code": code,
+            "expires_in": self.config.kangaroo_auth.handoff_ttl_s,
+            "user": principal.public_payload(),
+        })
+
+    async def _handle_kangaroo_exchange(self, request: WsRequest) -> Response:
+        if self.identity_verifier is None:
+            return _http_error(503, "Kangaroo authentication is unavailable")
+        from nanobot.webui.http_utils import bearer_token
+
+        access_token = bearer_token(request.headers)
+        if not access_token:
+            return _http_error(401, "Missing Kangaroo access token")
+        try:
+            principal = await self.identity_verifier.verify(access_token)
+            code = self.handoffs.issue(principal, self.config.kangaroo_auth.handoff_ttl_s)
+        except KangarooIdentityError as exc:
+            self._log.info("Kangaroo token exchange rejected: {}", exc)
+            return _http_error(exc.http_status, str(exc))
+        except OverflowError:
+            return _http_error(429, "too many outstanding handoff codes")
+        return _no_store_json_response({
+            "handoff_code": code,
+            "expires_in": self.config.kangaroo_auth.handoff_ttl_s,
+            "user": principal.public_payload(),
+        })
+
     def _handle_bootstrap(self, connection: Any, request: Any) -> Response:
-        secret = self.config.token_issue_secret.strip() or self.config.token.strip()
+        handoff = _case_insensitive_header(request.headers, "X-Nanobot-Handoff")
+        principal = self.handoffs.consume(handoff) if handoff else self.api_principal(request)
+        if handoff and principal is None:
+            return _no_store_json_response(
+                {
+                    "error": "Invalid or expired handoff code",
+                    "auth_mode": "kangaroo",
+                },
+                status=401,
+            )
+
+        if self.config.kangaroo_auth.enabled and principal is None:
+            return _no_store_json_response(
+                {
+                    "error": "Kangaroo account authentication required",
+                    "auth_mode": "kangaroo",
+                },
+                status=401,
+            )
+
         is_local_browser = _is_local_browser_request(connection, request.headers)
-        if secret:
-            if not _issue_route_secret_matches(request.headers, secret):
-                return _http_error(401, "Unauthorized")
-        elif not is_local_browser:
+        if principal is None and not is_local_browser:
             return _http_error(403, "bootstrap is localhost-only")
 
-        api_token_allowed = bool(secret) or is_local_browser
+        api_token_allowed = principal is not None or is_local_browser
         if not self.tokens.can_issue(include_api_token=api_token_allowed):
             return _http_response(
                 json.dumps({"error": "too many outstanding tokens"}).encode("utf-8"),
                 status=429,
                 content_type="application/json; charset=utf-8",
             )
-        token = self.tokens.issue_token(self.config.token_ttl_s)
+        token = self.tokens.issue_token(self.config.token_ttl_s, principal)
         api_token = (
-            self.tokens.issue_api_token(self.config.token_ttl_s)
+            self.tokens.issue_api_token(self.config.token_ttl_s, principal)
             if api_token_allowed
             else None
         )
@@ -346,7 +474,9 @@ class GatewayHTTPHandler:
         }
         if api_token is not None:
             payload["api_token"] = api_token
-        return _http_json_response(payload)
+        if principal is not None:
+            payload["identity"] = principal.public_payload()
+        return _no_store_json_response(payload)
 
     def _bootstrap_ws_url(self, request: Any) -> str:
         headers = getattr(request, "headers", {}) or {}
@@ -390,10 +520,13 @@ class GatewayHTTPHandler:
             return _http_error(401, "Unauthorized")
         if self.session_manager is None:
             return _http_error(503, "session manager unavailable")
-        payload = await asyncio.to_thread(self._sessions_list_payload)
+        payload = await asyncio.to_thread(
+            self._sessions_list_payload,
+            self.api_principal(request),
+        )
         return _http_json_response(payload)
 
-    def _sessions_list_payload(self) -> dict[str, Any]:
+    def _sessions_list_payload(self, principal: Principal | None = None) -> dict[str, Any]:
         assert self.session_manager is not None
         sessions = list_webui_sessions(self.session_manager)
         from nanobot.session.webui_turns import websocket_turn_wall_started_at
@@ -402,6 +535,10 @@ class GatewayHTTPHandler:
         for s in sessions:
             key = s.get("key")
             if not (isinstance(key, str) and key.startswith("websocket:")):
+                continue
+            if principal is not None and not self.tenant_runtimes.for_principal(
+                principal
+            ).owns_chat_id(key.split(":", 1)[1]):
                 continue
             row = {k: v for k, v in s.items() if k != "path"}
             chat_id = key.split(":", 1)[1]
@@ -423,6 +560,8 @@ class GatewayHTTPHandler:
             return _http_error(400, "invalid session key")
         if not _is_websocket_channel_session_key(decoded_key):
             return _http_error(404, "session not found")
+        if not self._request_can_access_session(request, decoded_key):
+            return _http_error(404, "session not found")
         data = self.session_manager.read_session_file(decoded_key)
         if data is None:
             return _http_error(404, "session not found")
@@ -442,6 +581,8 @@ class GatewayHTTPHandler:
         if decoded_key is None:
             return _http_error(400, "invalid session key")
         if not _is_websocket_channel_session_key(decoded_key):
+            return _http_error(404, "session not found")
+        if not self._request_can_access_session(request, decoded_key):
             return _http_error(404, "session not found")
         scope = self.workspaces.scope_for_session_key(decoded_key)
         session_messages: list[dict[str, Any]] | None = None
@@ -488,6 +629,8 @@ class GatewayHTTPHandler:
             return _http_error(400, "invalid session key")
         if not _is_websocket_channel_session_key(decoded_key):
             return _http_error(404, "session not found")
+        if not self._request_can_access_session(request, decoded_key):
+            return _http_error(404, "session not found")
         path = _query_first(_parse_query(request.path), "path")
         try:
             payload = file_preview_payload(
@@ -505,6 +648,8 @@ class GatewayHTTPHandler:
         if decoded_key is None:
             return _http_error(400, "invalid session key")
         if not _is_websocket_channel_session_key(decoded_key):
+            return _http_error(404, "session not found")
+        if not self._request_can_access_session(request, decoded_key):
             return _http_error(404, "session not found")
         pending_job_ids = self._pending_automation_ids_for_session(decoded_key)
         return _http_json_response(
@@ -525,6 +670,8 @@ class GatewayHTTPHandler:
         if decoded_key is None:
             return _http_error(400, "invalid session key")
         if not _is_websocket_channel_session_key(decoded_key):
+            return _http_error(404, "session not found")
+        if not self._request_can_access_session(request, decoded_key):
             return _http_error(404, "session not found")
         query = _parse_query(request.path)
         delete_automations = (_query_first(query, "delete_automations") or "").lower()
@@ -598,11 +745,42 @@ class GatewayHTTPHandler:
             pending.update(self.local_trigger_pending_ids(session_key))
         return pending
 
+    def _request_can_access_automation(
+        self,
+        request: WsRequest,
+        job: CronJob | LocalTrigger,
+    ) -> bool:
+        principal = self.api_principal(request)
+        if principal is None:
+            return True
+        if isinstance(job, LocalTrigger):
+            session_key = job.session_key or f"{job.channel}:{job.chat_id}"
+        else:
+            session_key = job.payload.session_key
+            if not session_key and job.payload.origin_channel and job.payload.origin_chat_id:
+                session_key = f"{job.payload.origin_channel}:{job.payload.origin_chat_id}"
+        return bool(session_key and self._request_can_access_session(request, session_key))
+
     def _handle_webui_automations(self, request: WsRequest) -> Response:
         if not self.check_api_token(request):
             return _http_error(401, "Unauthorized")
         pending_job_ids = self._pending_cron_job_ids_for_all()
         pending_job_ids.update(self._pending_local_trigger_ids_for_all())
+        if self.api_principal(request) is not None:
+            jobs: list[CronJob | LocalTrigger] = []
+            if self.cron_service is not None:
+                jobs.extend(self.cron_service.list_jobs(include_disabled=True))
+            if self.local_trigger_store is not None:
+                jobs.extend(self.local_trigger_store.list_triggers(include_disabled=True))
+            jobs = [job for job in jobs if self._request_can_access_automation(request, job)]
+            return _http_json_response({
+                "jobs": serialize_automation_jobs(
+                    jobs,
+                    pending_job_ids=pending_job_ids,
+                    include_details=True,
+                    session_manager=self.session_manager,
+                )
+            })
         return _http_json_response(
             all_automations_payload(
                 self.cron_service,
@@ -628,12 +806,16 @@ class GatewayHTTPHandler:
             return _http_error(400, "missing automation id")
         trigger = self.local_trigger_store.get(job_id) if self.local_trigger_store else None
         if trigger is not None:
+            if not self._request_can_access_automation(request, trigger):
+                return _http_error(404, "automation not found")
             return self._handle_local_trigger_action(request, action, trigger)
 
         if self.cron_service is None:
             return _http_error(404, "automation not found")
         job = self.cron_service.get_job(job_id)
         if job is None:
+            return _http_error(404, "automation not found")
+        if not self._request_can_access_automation(request, job):
             return _http_error(404, "automation not found")
         if job.payload.kind == "system_event":
             return _http_error(403, "system automation is protected")
@@ -763,11 +945,35 @@ class GatewayHTTPHandler:
     def _handle_commands(self, request: WsRequest) -> Response:
         if not self.check_api_token(request):
             return _http_error(401, "Unauthorized")
-        return _http_json_response({"commands": builtin_command_palette()})
+        commands = builtin_command_palette()
+        if self.api_principal(request) is not None:
+            blocked = {
+                "/dream",
+                "/dream-log",
+                "/dream-prompt",
+                "/dream-restore",
+                "/model",
+                "/pairing",
+                "/restart",
+            }
+            commands = [item for item in commands if item.get("command") not in blocked]
+        return _http_json_response({"commands": commands})
 
     def _handle_workspaces(self, connection: Any, request: WsRequest) -> Response:
         if not self.check_api_token(request):
             return _http_error(401, "Unauthorized")
+        principal = self.api_principal(request)
+        if principal is not None:
+            scope = self.tenant_runtimes.for_principal(principal).workspace_scope()
+            return _http_json_response({
+                "schema_version": 1,
+                "default_access_mode": "restricted",
+                "default_scope": scope.payload(),
+                "controls": {
+                    "can_change_project": False,
+                    "can_use_full_access": False,
+                },
+            })
         return _http_json_response(
             self.workspaces.payload(
                 controls_available=self.workspace_controls_available(connection)
@@ -804,7 +1010,10 @@ class GatewayHTTPHandler:
     def _handle_webui_sidebar_state(self, request: WsRequest) -> Response:
         if not self.check_api_token(request):
             return _http_error(401, "Unauthorized")
-        return _http_json_response(read_webui_sidebar_state())
+        principal = self.api_principal(request)
+        return _http_json_response(
+            read_webui_sidebar_state(principal.user_scope if principal else None)
+        )
 
     def _handle_webui_sidebar_state_update(self, request: WsRequest) -> Response:
         if not self.check_api_token(request):
@@ -820,7 +1029,11 @@ class GatewayHTTPHandler:
         if not isinstance(decoded, dict):
             return _http_error(400, "state must be an object")
         try:
-            state = write_webui_sidebar_state(decoded)
+            principal = self.api_principal(request)
+            state = write_webui_sidebar_state(
+                decoded,
+                principal.user_scope if principal else None,
+            )
         except ValueError as e:
             return _http_error(400, str(e))
         except OSError:

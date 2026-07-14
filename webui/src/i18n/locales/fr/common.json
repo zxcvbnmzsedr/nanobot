@@ -10,11 +10,11 @@
       "gatewayHint": "Assurez-vous que la gateway est en cours d’exécution (`nanobot gateway`) et que cette page est ouverte sur la même machine."
     },
     "auth": {
-      "title": "Authentification requise",
-      "hint": "Saisissez le secret configuré comme tokenIssueSecret dans la configuration de votre gateway.",
-      "placeholder": "Mot de passe",
-      "submit": "Se connecter",
-      "invalid": "Mot de passe invalide. Réessayez."
+      "kangarooTitle": "Connexion à Kangaroo",
+      "kangarooHint": "Utilisez le compte Kangaroo qui vous a été attribué.",
+      "username": "Compte ou numéro de téléphone",
+      "kangarooPassword": "Mot de passe",
+      "kangarooSubmit": "Se connecter"
     },
     "account": {
       "section": "Compte",

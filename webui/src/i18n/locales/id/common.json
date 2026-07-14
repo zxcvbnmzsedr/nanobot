@@ -10,11 +10,11 @@
       "gatewayHint": "Pastikan gateway sedang berjalan (`nanobot gateway`) dan halaman ini dibuka pada mesin yang sama."
     },
     "auth": {
-      "title": "Autentikasi diperlukan",
-      "hint": "Masukkan secret yang dikonfigurasi sebagai tokenIssueSecret di konfigurasi gateway.",
-      "placeholder": "Kata sandi",
-      "submit": "Hubungkan",
-      "invalid": "Kata sandi tidak valid. Coba lagi."
+      "kangarooTitle": "Masuk ke Kangaroo",
+      "kangarooHint": "Gunakan akun Kangaroo yang diberikan kepada Anda.",
+      "username": "Akun atau nomor telepon",
+      "kangarooPassword": "Kata sandi",
+      "kangarooSubmit": "Masuk"
     },
     "account": {
       "section": "Akun",

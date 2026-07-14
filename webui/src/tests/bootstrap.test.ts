@@ -2,9 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   BootstrapAuthRequiredError,
-  consumeUrlBootstrapSecret,
+  consumeUrlHandoff,
   deriveWsUrl,
   fetchBootstrap,
+  loginKangaroo,
 } from "@/lib/bootstrap";
 
 describe("bootstrap helpers", () => {
@@ -48,7 +49,7 @@ describe("bootstrap helpers", () => {
     vi.useFakeTimers();
     vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
 
-    const pending = expect(fetchBootstrap("", "", 25)).rejects.toThrow(
+    const pending = expect(fetchBootstrap("", 25)).rejects.toThrow(
       "Request timed out after 25ms",
     );
     await vi.advanceTimersByTimeAsync(25);
@@ -56,7 +57,7 @@ describe("bootstrap helpers", () => {
     await pending;
   });
 
-  it("treats bootstrap responses without an API token as auth-required", async () => {
+  it("rejects bootstrap responses without an API token", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -65,22 +66,64 @@ describe("bootstrap helpers", () => {
       })),
     );
 
-    const promise = fetchBootstrap();
-    await expect(promise).rejects.toMatchObject({
-      name: "BootstrapAuthRequiredError",
-      message: "bootstrap authentication required: missing api_token",
-    });
-    await expect(promise).rejects.toBeInstanceOf(BootstrapAuthRequiredError);
+    await expect(fetchBootstrap()).rejects.toThrow("bootstrap response missing api_token");
   });
 
-  it("consumes bootstrap secrets from the URL fragment", () => {
-    window.history.replaceState(
-      null,
-      "",
-      "/#/settings?bootstrapSecret=s3cret&section=models",
-    );
+  it("consumes a one-time account handoff from the URL fragment", () => {
+    window.history.replaceState(null, "", "/#/chat?handoff=nbho_code&keep=1");
 
-    expect(consumeUrlBootstrapSecret()).toBe("s3cret");
-    expect(window.location.hash).toBe("#/settings?section=models");
+    expect(consumeUrlHandoff()).toBe("nbho_code");
+    expect(window.location.hash).toBe("#/chat?keep=1");
+  });
+
+  it("sends account credentials in bootstrap headers", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      token: "ws-token",
+      api_token: "api-token",
+      ws_path: "/ws",
+      expires_in: 300,
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchBootstrap("", undefined, "nbho_code", "old-api-token");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/webui/bootstrap",
+      expect.objectContaining({
+        headers: {
+          "X-Nanobot-Handoff": "nbho_code",
+          Authorization: "Bearer old-api-token",
+        },
+      }),
+    );
+  });
+
+  it("logs in with Kangaroo credentials without putting them in the URL", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      handoff_code: "nbho_code",
+      expires_in: 60,
+      user: { userId: "101", orgId: "9001" },
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await loginKangaroo("13800138000", "secret-password");
+
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/auth/login");
+    expect(options).toMatchObject({ method: "GET", cache: "no-store" });
+    expect(options.headers.Authorization).toMatch(/^Basic /);
+    expect(String(url)).not.toContain("13800138000");
+    expect(String(url)).not.toContain("secret-password");
+  });
+
+  it("maps a rejected Kangaroo bootstrap to account authentication", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      error: "Kangaroo account authentication required",
+      auth_mode: "kangaroo",
+    }), { status: 401 })));
+
+    await expect(fetchBootstrap()).rejects.toMatchObject({
+      name: "BootstrapAuthRequiredError",
+    });
   });
 });

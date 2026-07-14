@@ -19,8 +19,7 @@ nanobot webui
 
 `nanobot webui` creates the config/workspace when needed, checks provider setup,
 offers Quick Start when the model provider is not ready, enables the local
-WebSocket channel after confirmation, generates a WebUI bootstrap secret when
-one is missing, starts the gateway, and opens the browser. The first-run path
+WebSocket channel after confirmation, starts the gateway, and opens the browser. The first-run path
 binds the WebUI to `127.0.0.1` by default, so it is not available from other
 devices on your LAN.
 
@@ -33,9 +32,8 @@ nanobot webui --background
 Manage the background gateway with `nanobot gateway status`, `nanobot gateway
 logs`, `nanobot gateway restart`, and `nanobot gateway stop`.
 
-Manual config still works. Same-machine localhost WebUI access can run without
-a browser password. Set `tokenIssueSecret` when you intentionally expose the
-WebUI beyond localhost or want a browser password:
+Manual config still works. Same-machine localhost WebUI access can run without account login.
+External access requires Kangaroo account authentication:
 
 ```json
 {
@@ -43,8 +41,11 @@ WebUI beyond localhost or want a browser password:
     "websocket": {
       "enabled": true,
       "host": "127.0.0.1",
-      "tokenIssueSecret": "your-webui-password",
-      "websocketRequiresToken": true
+      "websocketRequiresToken": true,
+      "kangarooAuth": {
+        "enabled": true,
+        "apiBase": "https://accounts.example.com"
+      }
     }
   }
 }
@@ -208,7 +209,7 @@ immediately for the current browser and do not change gateway configuration.
 ## LAN Access
 
 To open the WebUI from another device on the same network, bind the WebSocket
-channel to all interfaces and set a token or token issue secret:
+channel to all interfaces and enable Kangaroo authentication:
 
 ```json
 {
@@ -216,16 +217,18 @@ channel to all interfaces and set a token or token issue secret:
     "websocket": {
       "host": "0.0.0.0",
       "port": 8765,
-      "tokenIssueSecret": "your-secret-here"
+      "kangarooAuth": {
+        "enabled": true,
+        "apiBase": "https://accounts.example.com"
+      }
     }
   }
 }
 ```
 
-The gateway refuses to start with `host` set to `"0.0.0.0"` unless `token` or
-`tokenIssueSecret` is configured. After the gateway starts, open
-`http://<your-ip>:8765` from the other device and enter the secret in the login
-form.
+The gateway refuses to start with `host` set to `"0.0.0.0"` unless Kangaroo authentication is
+enabled. After the gateway starts, open `http://<your-ip>:8765` from the other device and sign in
+with a Kangaroo account. Use HTTPS before sending credentials outside localhost.
 
 Remote WebUI clients with a valid token can view and use Apps. Actions that
 install missing nanobot support packages, such as adding a channel dependency,

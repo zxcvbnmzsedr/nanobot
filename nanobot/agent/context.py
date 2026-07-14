@@ -12,6 +12,7 @@ from nanobot.agent.tools import mcp as mcp_tools
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.apps.cli import utils as cli_app_utils
 from nanobot.bus.events import InboundMessage
+from nanobot.identity.principal import IDENTITY_METADATA_KEY
 from nanobot.runtime_context import (
     RUNTIME_CONTEXT_END,
     RUNTIME_CONTEXT_MESSAGE_META,
@@ -57,6 +58,7 @@ class ContextBuilder:
         self.workspace = workspace
         self.timezone = timezone
         self.memory = MemoryStore(workspace)
+        self._workspace_memories: dict[Path, MemoryStore] = {workspace.resolve(): self.memory}
         self.skills = SkillsLoader(workspace, disabled_skills=set(disabled_skills) if disabled_skills else None)
 
     def build_system_prompt(
@@ -68,6 +70,7 @@ class ContextBuilder:
         include_memory_recent_history: bool = True,
         session_key: str | None = None,
         unified_session: bool = False,
+        session_metadata: Mapping[str, Any] | None = None,
     ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         root = workspace or self.workspace
@@ -79,9 +82,9 @@ class ContextBuilder:
 
         parts.append(render_template("agent/tool_contract.md"))
 
-        memory = self.memory.get_memory_context()
-        if memory and not self._is_template_content(self.memory.read_memory(), "memory/MEMORY.md"):
-            parts.append(f"# Memory\n\n{memory}")
+        memory_sections = self._memory_sections(root, session_metadata)
+        if memory_sections:
+            parts.append("# Memory\n\n" + "\n\n".join(memory_sections))
 
         always_skills = self.skills.get_always_skills()
         if always_skills:
@@ -94,8 +97,16 @@ class ContextBuilder:
             parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
 
         if include_memory_recent_history:
-            entries = self.memory.read_recent_history_for_prompt(
-                since_cursor=self.memory.get_last_dream_cursor(),
+            identity = (
+                session_metadata.get(IDENTITY_METADATA_KEY)
+                if isinstance(session_metadata, Mapping)
+                else None
+            )
+            prompt_memory = (
+                self.memory_for_workspace(root) if isinstance(identity, Mapping) else self.memory
+            )
+            entries = prompt_memory.read_recent_history_for_prompt(
+                since_cursor=prompt_memory.get_last_dream_cursor(),
                 session_key=session_key,
                 unified_session=unified_session,
             )
@@ -111,6 +122,48 @@ class ContextBuilder:
             parts.append(f"[Archived Context Summary]\n\n{session_summary}")
 
         return "\n\n---\n\n".join(parts)
+
+    def memory_for_workspace(self, workspace: Path) -> MemoryStore:
+        root = workspace.expanduser().resolve(strict=False)
+        store = self._workspace_memories.get(root)
+        if store is None:
+            store = MemoryStore(root)
+            self._workspace_memories[root] = store
+        return store
+
+    def _memory_sections(
+        self,
+        workspace: Path,
+        session_metadata: Mapping[str, Any] | None,
+    ) -> list[str]:
+        sections: list[str] = []
+        system_memory = self.memory.read_memory()
+        identity = (
+            session_metadata.get(IDENTITY_METADATA_KEY)
+            if isinstance(session_metadata, Mapping)
+            else None
+        )
+        if not isinstance(identity, Mapping):
+            legacy = self.memory.get_memory_context()
+            if system_memory and not self._is_template_content(system_memory, "memory/MEMORY.md"):
+                return [legacy]
+            return []
+        if system_memory and not self._is_template_content(system_memory, "memory/MEMORY.md"):
+            sections.append(f"## System Memory\n{system_memory}")
+
+        if isinstance(identity, Mapping):
+            org_path = identity.get("org_memory_path")
+            if isinstance(org_path, str) and org_path:
+                org_memory = MemoryStore.read_file(Path(org_path))
+                if org_memory:
+                    sections.append(f"## Organization Memory\n{org_memory}")
+
+        user_store = self.memory_for_workspace(workspace)
+        if user_store is not self.memory:
+            user_memory = user_store.read_memory()
+            if user_memory:
+                sections.append(f"## User Memory\n{user_memory}")
+        return sections
 
     def _get_identity(self, channel: str | None = None, workspace: Path | None = None) -> str:
         """Get the core identity section."""
@@ -200,6 +253,7 @@ class ContextBuilder:
                     include_memory_recent_history=include_memory_recent_history,
                     session_key=session_key,
                     unified_session=unified_session,
+                    session_metadata=session_metadata,
                 ),
             },
             *history,

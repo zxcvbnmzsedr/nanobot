@@ -1,65 +1,66 @@
-import type { BootstrapResponse } from "./types";
+import type { BootstrapResponse, KangarooLoginResponse } from "./types";
 import { fetchWithTimeout } from "./http";
 
-const SECRET_STORAGE_KEY = "nanobot-webui.bootstrap-secret";
-const URL_SECRET_PARAM = "bootstrapSecret";
+const URL_HANDOFF_PARAM = "handoff";
 
 export class BootstrapAuthRequiredError extends Error {
-  constructor(message = "bootstrap authentication required") {
+  constructor(message = "Kangaroo account authentication required") {
     super(message);
     this.name = "BootstrapAuthRequiredError";
   }
 }
 
-/** Read a previously saved bootstrap secret from localStorage. */
-export function loadSavedSecret(): string {
-  if (typeof window === "undefined") return "";
-  try {
-    return window.localStorage.getItem(SECRET_STORAGE_KEY) ?? "";
-  } catch {
-    return "";
-  }
+function basicAuthorization(username: string, password: string): string {
+  const bytes = new TextEncoder().encode(`${username}:${password}`);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `Basic ${window.btoa(binary)}`;
 }
 
-/** Persist the bootstrap secret so page reloads don't re-prompt. */
-export function saveSecret(secret: string): void {
-  try {
-    window.localStorage.setItem(SECRET_STORAGE_KEY, secret);
-  } catch {
-    // ignore storage errors (private mode, etc.)
+export async function loginKangaroo(
+  username: string,
+  password: string,
+  timeoutMs?: number,
+): Promise<KangarooLoginResponse> {
+  const res = await fetchWithTimeout("/api/auth/login", {
+    method: "GET",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: {
+      Authorization: basicAuthorization(username.trim(), password),
+    },
+  }, timeoutMs);
+  const body = await res.json().catch(() => ({})) as Partial<KangarooLoginResponse> & {
+    error?: string;
+  };
+  if (!res.ok) {
+    throw new Error(body.error?.trim() || `login failed: HTTP ${res.status}`);
   }
+  if (!body.handoff_code || !body.user?.userId || !body.user?.orgId) {
+    throw new Error("login response missing identity handoff");
+  }
+  return body as KangarooLoginResponse;
 }
 
-/** Clear the saved bootstrap secret (sign out). */
-export function clearSavedSecret(): void {
-  try {
-    window.localStorage.removeItem(SECRET_STORAGE_KEY);
-  } catch {
-    // ignore
-  }
-}
-
-export function consumeUrlBootstrapSecret(): string {
+export function consumeUrlHandoff(): string {
   if (typeof window === "undefined") return "";
   const hash = window.location.hash || "";
   const queryStart = hash.indexOf("?");
   if (queryStart < 0) return "";
 
   const path = hash.slice(0, queryStart) || "#/";
-  const query = hash.slice(queryStart + 1);
-  const params = new URLSearchParams(query);
-  const secret = params.get(URL_SECRET_PARAM)?.trim() || "";
-  if (!secret) return "";
+  const params = new URLSearchParams(hash.slice(queryStart + 1));
+  const handoff = params.get(URL_HANDOFF_PARAM)?.trim() || "";
+  if (!handoff) return "";
 
-  params.delete(URL_SECRET_PARAM);
+  params.delete(URL_HANDOFF_PARAM);
   const nextQuery = params.toString();
-  const nextHash = `${path}${nextQuery ? `?${nextQuery}` : ""}`;
   window.history.replaceState(
     null,
     "",
-    `${window.location.pathname}${window.location.search}${nextHash}`,
+    `${window.location.pathname}${window.location.search}${path}${nextQuery ? `?${nextQuery}` : ""}`,
   );
-  return secret;
+  return handoff;
 }
 
 /**
@@ -68,20 +69,28 @@ export function consumeUrlBootstrapSecret(): string {
  */
 export async function fetchBootstrap(
   baseUrl: string = "",
-  secret: string = "",
   timeoutMs?: number,
+  handoff: string = "",
+  apiToken: string = "",
 ): Promise<BootstrapResponse> {
   const headers: Record<string, string> = {};
-  if (secret) {
-    headers["X-Nanobot-Auth"] = secret;
+  if (handoff) {
+    headers["X-Nanobot-Handoff"] = handoff;
+  }
+  if (apiToken) {
+    headers.Authorization = `Bearer ${apiToken}`;
   }
   const res = await fetchWithTimeout(`${baseUrl}/webui/bootstrap`, {
     method: "GET",
+    cache: "no-store",
     credentials: "same-origin",
     headers,
   }, timeoutMs);
   if (!res.ok) {
-    if (res.status === 401 || res.status === 403) {
+    const errorBody = await res.clone().json().catch(() => ({})) as {
+      auth_mode?: string;
+    };
+    if (res.status === 401 && errorBody.auth_mode === "kangaroo") {
       throw new BootstrapAuthRequiredError(`bootstrap failed: HTTP ${res.status}`);
     }
     throw new Error(`bootstrap failed: HTTP ${res.status}`);
@@ -91,9 +100,7 @@ export async function fetchBootstrap(
     throw new Error("bootstrap response missing token or ws_path");
   }
   if (!body.api_token) {
-    throw new BootstrapAuthRequiredError(
-      "bootstrap authentication required: missing api_token",
-    );
+    throw new Error("bootstrap response missing api_token");
   }
   return body;
 }

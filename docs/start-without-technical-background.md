@@ -225,8 +225,11 @@ Merge them into one object:
   },
   "channels": {
     "websocket": {
-      "tokenIssueSecret": "your-webui-password",
-      "websocketRequiresToken": true
+      "websocketRequiresToken": true,
+      "kangarooAuth": {
+        "enabled": true,
+        "apiBase": "https://accounts.example.com"
+      }
     }
   }
 }
@@ -287,14 +290,17 @@ If this is a brand-new install and you have not configured anything else yet, re
   },
   "channels": {
     "websocket": {
-      "tokenIssueSecret": "your-webui-password",
-      "websocketRequiresToken": true
+      "websocketRequiresToken": true,
+      "kangarooAuth": {
+        "enabled": true,
+        "apiBase": "https://accounts.example.com"
+      }
     }
   }
 }
 ```
 
-Replace `your-api-key`, `https://api.example.com/v1`, `model-id-from-your-provider`, and `your-webui-password` with your own values.
+Replace `your-api-key`, `https://api.example.com/v1`, `model-id-from-your-provider`, and the Kangaroo account API address with your own values.
 
 For copyable provider-specific examples, use [`provider-cookbook.md`](./provider-cookbook.md).
 

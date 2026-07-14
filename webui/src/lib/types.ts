@@ -311,6 +311,23 @@ export interface BootstrapResponse {
   model_name?: string | null;
   runtime_surface?: RuntimeSurface;
   runtime_capabilities?: RuntimeCapabilities;
+  identity?: {
+    userId: string;
+    orgId: string;
+    name?: string;
+    orgName?: string;
+  };
+}
+
+export interface KangarooLoginResponse {
+  handoff_code: string;
+  expires_in: number;
+  user: {
+    userId: string;
+    orgId: string;
+    name?: string;
+    orgName?: string;
+  };
 }
 
 export type RuntimeSurface = "browser" | "native";

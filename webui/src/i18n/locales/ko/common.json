@@ -10,11 +10,11 @@
       "gatewayHint": "gateway(`nanobot gateway`)가 실행 중인지, 그리고 이 페이지가 같은 머신에서 열려 있는지 확인하세요."
     },
     "auth": {
-      "title": "인증이 필요합니다",
-      "hint": "gateway 설정의 tokenIssueSecret에 구성된 비밀 값을 입력하세요.",
-      "placeholder": "비밀번호",
-      "submit": "연결",
-      "invalid": "비밀번호가 올바르지 않습니다. 다시 시도하세요."
+      "kangarooTitle": "Kangaroo 로그인",
+      "kangarooHint": "할당된 Kangaroo 계정을 사용하세요.",
+      "username": "계정 또는 전화번호",
+      "kangarooPassword": "비밀번호",
+      "kangarooSubmit": "로그인"
     },
     "account": {
       "section": "계정",

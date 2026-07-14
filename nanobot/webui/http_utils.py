@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import email.utils
-import hmac
 import http
 import ipaddress
 import json
@@ -197,16 +196,3 @@ def bearer_token(headers: Any) -> str | None:
     if auth and auth.lower().startswith("bearer "):
         return auth[7:].strip() or None
     return None
-
-
-def issue_route_secret_matches(headers: Any, configured_secret: str) -> bool:
-    if not configured_secret:
-        return True
-    authorization = headers.get("Authorization") or headers.get("authorization")
-    if authorization and authorization.lower().startswith("bearer "):
-        supplied = authorization[7:].strip()
-        return hmac.compare_digest(supplied, configured_secret)
-    header_token = headers.get("X-Nanobot-Auth") or headers.get("x-nanobot-auth")
-    if not header_token:
-        return False
-    return hmac.compare_digest(header_token.strip(), configured_secret)

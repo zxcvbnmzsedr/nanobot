@@ -10,11 +10,11 @@
       "gatewayHint": "Hãy chắc chắn gateway đang chạy (`nanobot gateway`) và trang này được mở trên cùng máy."
     },
     "auth": {
-      "title": "Cần xác thực",
-      "hint": "Nhập secret được cấu hình là tokenIssueSecret trong cấu hình gateway.",
-      "placeholder": "Mật khẩu",
-      "submit": "Kết nối",
-      "invalid": "Mật khẩu không hợp lệ. Hãy thử lại."
+      "kangarooTitle": "Đăng nhập Kangaroo",
+      "kangarooHint": "Sử dụng tài khoản Kangaroo được cấp cho bạn.",
+      "username": "Tài khoản hoặc số điện thoại",
+      "kangarooPassword": "Mật khẩu",
+      "kangarooSubmit": "Đăng nhập"
     },
     "account": {
       "section": "Tài khoản",

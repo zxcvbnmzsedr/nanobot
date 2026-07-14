@@ -10,11 +10,11 @@
       "gatewayHint": "gateway（`nanobot gateway`）が起動しており、このページが同じマシン上で開かれていることを確認してください。"
     },
     "auth": {
-      "title": "認証が必要です",
-      "hint": "gateway 設定の tokenIssueSecret に指定されたシークレットを入力してください。",
-      "placeholder": "パスワード",
-      "submit": "接続",
-      "invalid": "パスワードが無効です。もう一度お試しください。"
+      "kangarooTitle": "Kangaroo にサインイン",
+      "kangarooHint": "割り当てられた Kangaroo アカウントを使用してください。",
+      "username": "アカウントまたは電話番号",
+      "kangarooPassword": "パスワード",
+      "kangarooSubmit": "サインイン"
     },
     "account": {
       "section": "アカウント",

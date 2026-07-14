@@ -29,9 +29,12 @@ def create_webui_chat_fork(
     source_chat_id: str,
     before_user_index: int,
     title: str | None = None,
+    target_chat_id: str | None = None,
 ) -> tuple[str, str] | None:
     """Return ``(chat_id, session_key)`` for a new fork, or ``None`` for bad input."""
-    new_id = str(uuid.uuid4())
+    new_id = target_chat_id or str(uuid.uuid4())
+    if not _valid_webui_chat_id(new_id):
+        return None
     source_key = f"websocket:{source_chat_id}"
     target_key = f"websocket:{new_id}"
     try:
@@ -90,6 +93,7 @@ async def handle_webui_fork_chat(channel: Any, connection: Any, envelope: Mappin
             source_chat_id=source_chat_id,
             before_user_index=raw_index,
             title=envelope.get("title") if isinstance(envelope.get("title"), str) else None,
+            target_chat_id=channel._new_chat_id(connection),
         )
         if forked is None:
             await channel._send_event(connection, "error", detail="invalid fork source or index")
