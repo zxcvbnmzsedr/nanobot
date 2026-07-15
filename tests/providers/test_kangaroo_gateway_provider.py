@@ -24,6 +24,10 @@ def _context(principal: Principal) -> RequestContext:
     return RequestContext(
         channel="websocket",
         chat_id="chat-1",
+        message_id="message-1",
+        session_key="websocket:chat-1",
+        original_user_text="查询 VIN",
+        turn_id="websocket:chat-1:123456789",
         metadata={IDENTITY_METADATA_KEY: principal.metadata()},
     )
 
@@ -106,6 +110,13 @@ async def test_stream_converts_content_reasoning_tools_and_usage() -> None:
         )
 
     assert captured["authorization"] == "Bearer kangaroo-token"
+    assert captured["body"]["conversation"] == {
+        "conversationId": "chat-1",
+        "turnId": "9e0d5b1972991e6363efae42c52a7cd976084d276c48a6d1cf67859ef94ce619",
+        "messageId": "9deb880b43bdf6f465a0afb130aed71b31cf219626f3637f577d4167cd80e5f2",
+        "channel": "websocket",
+        "userMessage": "查询 VIN",
+    }
     assert captured["body"]["messages"] == [{"role": "user", "content": "查询 VIN"}]
     assert captured["body"]["generation"] == {
         "maxTokens": 2048,

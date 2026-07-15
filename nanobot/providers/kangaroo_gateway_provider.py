@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import secrets
 from collections.abc import Awaitable, Callable
@@ -119,7 +120,22 @@ class KangarooGatewayProvider(LLMProvider):
         normalized_effort = cls._reasoning_effort(reasoning_effort)
         if normalized_effort is not None:
             generation["reasoningEffort"] = normalized_effort
+        context = current_request_context()
+        if context is None:
+            raise ValueError("Kangaroo model requests require a request context")
+        turn_source = context.turn_id or context.message_id or (
+            f"{context.session_key or context.chat_id}:{context.original_user_text or ''}"
+        )
+        turn_id = hashlib.sha256(turn_source.encode("utf-8")).hexdigest()
+        message_source = context.message_id or f"{turn_id}:user"
         payload: dict[str, Any] = {
+            "conversation": {
+                "conversationId": context.chat_id,
+                "turnId": turn_id,
+                "messageId": hashlib.sha256(message_source.encode("utf-8")).hexdigest(),
+                "channel": context.channel,
+                "userMessage": context.original_user_text,
+            },
             "messages": sanitized,
             "tools": tools or [],
             "generation": generation,
