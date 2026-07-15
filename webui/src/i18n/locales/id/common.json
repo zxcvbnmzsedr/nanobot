@@ -240,6 +240,8 @@
       "fullAccess": "Akses penuh",
       "configured": "Terkonfigurasi",
       "notConfigured": "Belum dikonfigurasi",
+      "kangarooModelService": "Layanan model Kangaroo",
+      "serverManaged": "Dikelola oleh server",
       "pending": "Tertunda",
       "restartingEngine": "Memulai ulang"
     },
@@ -1011,6 +1013,7 @@
       "send": "Kirim pesan",
       "stop": "Hentikan respons",
       "modelNotConfigured": "Model belum dikonfigurasi",
+      "kangarooModelService": "Layanan model Kangaroo",
       "configureModel": "Konfigurasi model",
       "queued": {
         "label": "Panduan antrean",

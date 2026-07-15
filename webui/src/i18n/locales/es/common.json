@@ -240,6 +240,8 @@
       "fullAccess": "Acceso completo",
       "configured": "Configurado",
       "notConfigured": "Sin configurar",
+      "kangarooModelService": "Servicio de modelos de Kangaroo",
+      "serverManaged": "Gestionado por el servidor",
       "pending": "Pendiente",
       "restartingEngine": "Reiniciando"
     },
@@ -1012,6 +1014,7 @@
       "send": "Enviar mensaje",
       "stop": "Detener respuesta",
       "modelNotConfigured": "Modelo no configurado",
+      "kangarooModelService": "Servicio de modelos de Kangaroo",
       "configureModel": "Configurar modelo",
       "queued": {
         "label": "Guía en cola",

@@ -240,6 +240,8 @@
       "fullAccess": "전체 접근",
       "configured": "구성됨",
       "notConfigured": "미구성",
+      "kangarooModelService": "Kangaroo 모델 서비스",
+      "serverManaged": "서버에서 관리",
       "pending": "대기 중",
       "restartingEngine": "재시작 중"
     },
@@ -1011,6 +1013,7 @@
       "send": "메시지 보내기",
       "stop": "응답 중지",
       "modelNotConfigured": "모델이 설정되지 않음",
+      "kangarooModelService": "Kangaroo 모델 서비스",
       "configureModel": "모델 설정",
       "queued": {
         "label": "대기 중인 안내",

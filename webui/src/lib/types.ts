@@ -371,6 +371,7 @@ export interface ProviderModelsPayload {
 }
 
 export interface SettingsPayload {
+  model_control?: "local" | "server";
   surface?: RuntimeSurface;
   runtime_surface?: RuntimeSurface;
   runtime_capabilities?: RuntimeCapabilities;

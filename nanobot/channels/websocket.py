@@ -11,6 +11,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Self
+from urllib.parse import urlparse
 
 from pydantic import Field, field_validator, model_validator
 from websockets.asyncio.server import ServerConnection, serve, unix_serve
@@ -78,16 +79,20 @@ class KangarooAuthConfig(Base):
 
     enabled: bool = False
     api_base: str = ""
+    llm_proxy_url: str = ""
     user_info_path: str = "api/auth/userInfo"
     exchange_path: str = "/api/auth/exchange"
     login_path: str = "/api/auth/login"
+    logout_path: str = "/api/auth/logout"
     upstream_login_path: str = "api/auth/oauth/login"
+    upstream_refresh_path: str = "api/auth/oauth/token"
     handoff_ttl_s: int = Field(default=60, ge=10, le=600)
     request_timeout_s: float = Field(default=10.0, ge=1.0, le=30.0)
+    refresh_skew_s: int = Field(default=3600, ge=30, le=21_600)
     allowed_user_ids: list[str] = Field(default_factory=list)
     runtime_root: str = ""
 
-    @field_validator("exchange_path", "login_path")
+    @field_validator("exchange_path", "login_path", "logout_path")
     @classmethod
     def exchange_path_format(cls, value: str) -> str:
         if not value.startswith("/"):
@@ -107,10 +112,23 @@ class KangarooAuthConfig(Base):
             raise ValueError("runtime_root must be an absolute path")
         return str(path)
 
+    @field_validator("llm_proxy_url")
+    @classmethod
+    def llm_proxy_url_format(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            return ""
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("llm_proxy_url must be an absolute HTTP(S) URL")
+        return value
+
     @model_validator(mode="after")
     def require_api_base_when_enabled(self) -> Self:
         if self.enabled and not self.api_base.strip():
             raise ValueError("kangaroo_auth.api_base is required when enabled")
+        if self.enabled and not self.llm_proxy_url:
+            raise ValueError("kangaroo_auth.llm_proxy_url is required when enabled")
         return self
 
 
@@ -605,9 +623,6 @@ class WebSocketChannel(BaseChannel):
 
         default_chat_id = self._new_chat_id(connection)
         tenant_runtime = self._tenant_runtime(connection)
-        if tenant_runtime is not None:
-            self._workspaces.persist_scope(default_chat_id, tenant_runtime.workspace_scope())
-            self._persist_tenant_identity(connection, default_chat_id)
 
         try:
             await connection.send(
@@ -644,6 +659,15 @@ class WebSocketChannel(BaseChannel):
                     continue
                 if await self._reject_blocked_account_command(connection, content):
                     continue
+                metadata: dict[str, Any] = {
+                    "remote": getattr(connection, "remote_address", None),
+                }
+                if tenant_runtime is not None:
+                    scope = tenant_runtime.workspace_scope()
+                    metadata[IDENTITY_METADATA_KEY] = tenant_runtime.principal.metadata()
+                    metadata[WORKSPACE_SCOPE_METADATA_KEY] = scope.metadata()
+                    self._workspaces.persist_scope(default_chat_id, scope)
+                    self._persist_tenant_identity(connection, default_chat_id)
                 # WebSocket already authenticates at handshake time (token),
                 # so pairing is not applicable. Treat as non-DM to avoid
                 # sending pairing codes to an already-authenticated client.
@@ -651,14 +675,7 @@ class WebSocketChannel(BaseChannel):
                     sender_id=client_id,
                     chat_id=default_chat_id,
                     content=content,
-                    metadata={
-                        "remote": getattr(connection, "remote_address", None),
-                        **(
-                            {IDENTITY_METADATA_KEY: principal.metadata()}
-                            if tenant_runtime
-                            else {}
-                        ),
-                    },
+                    metadata=metadata,
                     is_dm=False,
                 )
         except Exception as e:

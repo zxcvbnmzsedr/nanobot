@@ -21,6 +21,7 @@ from nanobot.channels.base import BaseChannel
 from nanobot.channels.websocket import WebSocketChannel, WebSocketConfig
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronJob, CronPayload, CronSchedule
+from nanobot.identity.kangaroo import AuthenticatedKangarooIdentity
 from nanobot.identity.principal import Principal
 from nanobot.optional_features import InstallResult
 from nanobot.runtime_context import (
@@ -237,14 +238,22 @@ async def test_kangaroo_native_login_routes_into_identity_bootstrap(
         kangarooAuth={
             "enabled": True,
             "apiBase": "https://accounts.example.com/",
+            "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
             "runtimeRoot": str(tmp_path / "tenants"),
         },
     )
 
     class Verifier:
-        async def login(self, username: str, password: str) -> Principal:
+        async def login_with_access_token(
+            self,
+            username: str,
+            password: str,
+        ) -> AuthenticatedKangarooIdentity:
             assert (username, password) == ("13800138000", "secret-password")
-            return Principal(user_id="101", org_id="9001", name="Alice")
+            return AuthenticatedKangarooIdentity(
+                Principal(user_id="101", org_id="9001", name="Alice"),
+                "native-login-token",
+            )
 
     channel.gateway.http.identity_verifier = Verifier()  # type: ignore[assignment]
     server_task = asyncio.create_task(channel.start())
@@ -2743,6 +2752,7 @@ def test_wildcard_host_with_kangaroo_auth_is_valid(bus: MagicMock, tmp_path: Pat
         kangarooAuth={
             "enabled": True,
             "apiBase": "https://accounts.example.com/",
+            "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
             "runtimeRoot": str(tmp_path / "tenants"),
         },
     )
@@ -2771,6 +2781,7 @@ def test_bootstrap_ws_url_uses_forwarded_https_host(bus: MagicMock, tmp_path: Pa
         kangarooAuth={
             "enabled": True,
             "apiBase": "https://accounts.example.com/",
+            "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
             "runtimeRoot": str(tmp_path / "tenants"),
         },
     )

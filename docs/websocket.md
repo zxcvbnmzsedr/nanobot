@@ -29,7 +29,8 @@ override under `channels.websocket`:
       "websocketRequiresToken": true,
       "kangarooAuth": {
         "enabled": true,
-        "apiBase": "https://accounts.example.com"
+        "apiBase": "https://accounts.example.com",
+        "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream"
       },
       "allowFrom": ["*"],
       "streaming": true
@@ -209,7 +210,7 @@ All fields go under `channels.websocket` in `config.json`.
 |-------|------|---------|-------------|
 | `websocketRequiresToken` | bool | `true` | Require a valid short-lived token issued by authenticated bootstrap. Set to `false` only for same-machine development. |
 | `tokenTtlS` | int | `300` | Time-to-live for issued tokens in seconds (30 – 86,400). |
-| `kangarooAuth` | object | disabled | Kangaroo login, identity verification, handoff, and tenant runtime configuration. See [Kangaroo account authentication](./kangaroo-account-auth.md). |
+| `kangarooAuth` | object | disabled | Kangaroo login, encrypted refresh-token persistence, automatic refresh, handoff, and tenant runtime configuration. See [Kangaroo account authentication](./kangaroo-account-auth.md). |
 
 ### Access Control
 
@@ -247,6 +248,8 @@ The only remote issuance path starts with a verified Kangaroo identity:
 2. Nanobot returns a short-lived, single-use handoff code.
 3. `/webui/bootstrap` consumes the handoff and returns separate WebSocket and REST API tokens.
 4. The WebSocket token is consumed during the handshake and carries the verified `userId/orgId`.
+5. Native login credentials are refreshed before expiry and restored after gateway restarts; logout
+   deletes the persisted credential and revokes outstanding grants.
 
 ### Limits
 
@@ -341,7 +344,8 @@ Outbound `message` events may include a `media` field containing local filesyste
       "websocketRequiresToken": true,
       "kangarooAuth": {
         "enabled": true,
-        "apiBase": "https://accounts.example.com"
+        "apiBase": "https://accounts.example.com",
+        "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream"
       },
       "sslCertfile": "/etc/ssl/certs/server.pem",
       "sslKeyfile": "/etc/ssl/private/server-key.pem",

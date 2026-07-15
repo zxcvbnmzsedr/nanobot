@@ -240,6 +240,8 @@
       "fullAccess": "完全アクセス",
       "configured": "設定済み",
       "notConfigured": "未設定",
+      "kangarooModelService": "Kangarooモデルサービス",
+      "serverManaged": "サーバーで一元管理",
       "pending": "保留中",
       "restartingEngine": "再起動中"
     },
@@ -1011,6 +1013,7 @@
       "send": "メッセージを送信",
       "stop": "応答を停止",
       "modelNotConfigured": "モデルが未設定です",
+      "kangarooModelService": "Kangarooモデルサービス",
       "configureModel": "モデルを設定",
       "queued": {
         "label": "保留中のガイド",

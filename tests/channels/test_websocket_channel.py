@@ -34,6 +34,8 @@ from nanobot.channels.websocket import (
 )
 from nanobot.config.loader import load_config, save_config
 from nanobot.config.schema import Config, ModelPresetConfig
+from nanobot.identity.principal import IDENTITY_METADATA_KEY, Principal
+from nanobot.security.workspace_access import WORKSPACE_SCOPE_METADATA_KEY
 from nanobot.session import webui_turns as wth
 from nanobot.session.manager import SessionManager
 from nanobot.webui.gateway_services import GatewayServices, build_gateway_services
@@ -219,6 +221,25 @@ async def _recv_ws_event(client: Any, event: str) -> dict[str, Any]:
 
 def _sent_ws_payloads(mock_ws: AsyncMock) -> list[dict[str, Any]]:
     return [json.loads(call.args[0]) for call in mock_ws.send.await_args_list]
+
+
+class _ScriptedConnection:
+    remote_address = ("127.0.0.1", 50123)
+
+    def __init__(self, frames: list[str]) -> None:
+        self.request = MagicMock(path="/ws?client_id=webui-client")
+        self._frames = frames
+        self.sent: list[str] = []
+
+    def __aiter__(self):
+        async def iterate():
+            for frame in self._frames:
+                yield frame
+
+        return iterate()
+
+    async def send(self, raw: str) -> None:
+        self.sent.append(raw)
 
 
 def test_parse_request_path_strips_trailing_slash_except_root() -> None:
@@ -2382,6 +2403,117 @@ async def test_websocket_requires_token_without_issue_path(bus: MagicMock) -> No
 # The multiplex protocol lets one WS connection route N logical chats over
 # typed envelopes (`new_chat` / `attach` / `message`). Legacy frames must keep
 # working on the connection's default chat_id.
+
+
+def _authenticated_channel(
+    bus: MagicMock,
+    tmp_path: Path,
+) -> tuple[WebSocketChannel, SessionManager, Principal]:
+    sessions = SessionManager(tmp_path / "sessions")
+    principal = Principal(user_id="101", org_id="9001", name="Alice")
+    channel = WebSocketChannel(
+        {
+            "enabled": True,
+            "allowFrom": ["*"],
+            "host": "127.0.0.1",
+            "port": 0,
+            "path": "/ws",
+            "websocketRequiresToken": False,
+        },
+        bus,
+        gateway=_basic_handler(
+            bus,
+            session_manager=sessions,
+            workspace_path=tmp_path / "system",
+        ),
+    )
+    return channel, sessions, principal
+
+
+@pytest.mark.asyncio
+async def test_authenticated_ready_does_not_create_session(
+    bus: MagicMock,
+    tmp_path: Path,
+) -> None:
+    channel, sessions, principal = _authenticated_channel(bus, tmp_path)
+    connection = _ScriptedConnection([])
+    channel._conn_principals[connection] = principal
+
+    await channel._connection_loop(connection)
+
+    ready = json.loads(connection.sent[0])
+    assert ready["event"] == "ready"
+    assert ready["identity"]["userId"] == "101"
+    assert sessions.list_sessions() == []
+
+
+@pytest.mark.asyncio
+async def test_authenticated_attach_does_not_create_extra_ready_session(
+    bus: MagicMock,
+    tmp_path: Path,
+) -> None:
+    channel, sessions, principal = _authenticated_channel(bus, tmp_path)
+    runtime = channel.gateway.tenant_runtimes.for_principal(principal)
+    existing_chat = runtime.new_chat_id()
+    sessions.save(sessions.get_or_create(f"websocket:{existing_chat}"))
+    connection = _ScriptedConnection([
+        json.dumps({"type": "attach", "chat_id": existing_chat}),
+    ])
+    channel._conn_principals[connection] = principal
+
+    await channel._connection_loop(connection)
+
+    events = [json.loads(raw) for raw in connection.sent]
+    ready_chat = events[0]["chat_id"]
+    assert any(event == {"event": "attached", "chat_id": existing_chat} for event in events)
+    assert ready_chat != existing_chat
+    assert [row["key"] for row in sessions.list_sessions()] == [f"websocket:{existing_chat}"]
+    assert sessions.read_session_file(f"websocket:{ready_chat}") is None
+
+
+@pytest.mark.asyncio
+async def test_authenticated_legacy_message_persists_default_session_context(
+    bus: MagicMock,
+    tmp_path: Path,
+) -> None:
+    channel, sessions, principal = _authenticated_channel(bus, tmp_path)
+    connection = _ScriptedConnection(["hello from legacy"])
+    channel._conn_principals[connection] = principal
+
+    await channel._connection_loop(connection)
+
+    ready_chat = json.loads(connection.sent[0])["chat_id"]
+    saved = sessions.read_session_file(f"websocket:{ready_chat}")
+    assert saved is not None
+    assert saved["metadata"]["webui"] is True
+    assert WORKSPACE_SCOPE_METADATA_KEY in saved["metadata"]
+    assert saved["metadata"][IDENTITY_METADATA_KEY]["user_id"] == "101"
+    inbound = bus.publish_inbound.await_args.args[0]
+    assert inbound.chat_id == ready_chat
+    assert inbound.metadata[IDENTITY_METADATA_KEY]["user_id"] == "101"
+    assert WORKSPACE_SCOPE_METADATA_KEY in inbound.metadata
+
+
+@pytest.mark.asyncio
+async def test_authenticated_new_chat_still_persists_session(
+    bus: MagicMock,
+    tmp_path: Path,
+) -> None:
+    channel, sessions, principal = _authenticated_channel(bus, tmp_path)
+    connection = _ScriptedConnection([json.dumps({"type": "new_chat"})])
+    channel._conn_principals[connection] = principal
+
+    await channel._connection_loop(connection)
+
+    events = [json.loads(raw) for raw in connection.sent]
+    ready_chat = events[0]["chat_id"]
+    attached = next(event for event in events if event["event"] == "attached")
+    new_chat = attached["chat_id"]
+    assert new_chat != ready_chat
+    saved = sessions.read_session_file(f"websocket:{new_chat}")
+    assert saved is not None
+    assert saved["metadata"][IDENTITY_METADATA_KEY]["user_id"] == "101"
+    assert sessions.read_session_file(f"websocket:{ready_chat}") is None
 
 
 @pytest.mark.asyncio

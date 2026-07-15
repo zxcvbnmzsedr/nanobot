@@ -17,6 +17,7 @@ from nanobot.agent.tools.context import (
     RequestContext,
     ToolContext,
     bind_request_context,
+    current_request_context,
     reset_request_context,
 )
 from nanobot.agent.tools.file_state import FileStates
@@ -223,6 +224,7 @@ class SubagentManager:
         origin_message_id: str | None = None,
         temperature: float | None = None,
         workspace_scope: WorkspaceScope | None = None,
+        request_metadata: dict[str, Any] | None = None,
         *,
         runtime: LLMRuntime | None = None,
     ) -> str:
@@ -231,6 +233,9 @@ class SubagentManager:
             runtime = self._compat_spawn_runtime()
         if temperature is not None:
             runtime = runtime.with_generation_overrides(temperature=temperature)
+        if request_metadata is None:
+            parent_context = current_request_context()
+            request_metadata = dict(parent_context.metadata) if parent_context is not None else {}
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id, "session_key": session_key}
@@ -253,6 +258,7 @@ class SubagentManager:
                 runtime,
                 origin_message_id,
                 workspace_scope,
+                dict(request_metadata or {}),
             )
         )
         self._running_tasks[task_id] = bg_task
@@ -282,6 +288,7 @@ class SubagentManager:
         runtime: LLMRuntime,
         origin_message_id: str | None = None,
         workspace_scope: WorkspaceScope | None = None,
+        request_metadata: dict[str, Any] | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
@@ -315,6 +322,7 @@ class SubagentManager:
                 message_id=origin_message_id,
                 session_key=sess_key,
                 runtime=runtime,
+                metadata=dict(request_metadata or {}),
             ))
             token = bind_workspace_scope(workspace_scope) if workspace_scope is not None else None
             try:

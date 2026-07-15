@@ -190,6 +190,9 @@ vi.mock("@/lib/bootstrap", () => ({
   deriveWsUrl: vi.fn(() => "ws://test"),
   loginKangaroo: vi.fn(),
   consumeUrlHandoff: vi.fn(() => ""),
+  readSessionApiToken: vi.fn(() => ""),
+  storeSessionApiToken: vi.fn(),
+  clearSessionApiToken: vi.fn(),
 }));
 
 vi.mock("@/lib/nanobot-client", () => {
@@ -223,9 +226,12 @@ vi.mock("@/lib/nanobot-client", () => {
 
 import {
   BootstrapAuthRequiredError,
+  clearSessionApiToken,
   deriveWsUrl,
   fetchBootstrap,
   loginKangaroo,
+  readSessionApiToken,
+  storeSessionApiToken,
 } from "@/lib/bootstrap";
 import App from "@/App";
 
@@ -262,6 +268,9 @@ describe("App layout", () => {
       expires_in: 60,
       user: { userId: "101", orgId: "9001" },
     });
+    vi.mocked(readSessionApiToken).mockReset().mockReturnValue("");
+    vi.mocked(storeSessionApiToken).mockReset();
+    vi.mocked(clearSessionApiToken).mockReset();
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({
@@ -297,6 +306,36 @@ describe("App layout", () => {
     await waitFor(() => {
       expect(fetchBootstrap).toHaveBeenLastCalledWith("", undefined, "nbho-code");
     });
+    expect(storeSessionApiToken).toHaveBeenCalledWith("api-tok");
+  });
+
+  it("restores the Kangaroo browser session after a page refresh", async () => {
+    vi.mocked(readSessionApiToken).mockReturnValue("stored-api-token");
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(fetchBootstrap).toHaveBeenCalledWith(
+        "",
+        undefined,
+        "",
+        "stored-api-token",
+      );
+    });
+    expect(storeSessionApiToken).toHaveBeenCalledWith("api-tok");
+    expect(connectSpy).toHaveBeenCalled();
+  });
+
+  it("clears an expired Kangaroo browser session", async () => {
+    vi.mocked(readSessionApiToken).mockReturnValue("expired-api-token");
+    vi.mocked(fetchBootstrap).mockRejectedValueOnce(
+      new BootstrapAuthRequiredError("bootstrap failed: HTTP 401"),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText("Sign in to Kangaroo")).toBeInTheDocument();
+    expect(clearSessionApiToken).toHaveBeenCalled();
   });
 
   it("keeps sidebar layout out of the main thread width contract", async () => {

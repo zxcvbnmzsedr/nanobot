@@ -627,6 +627,12 @@ export function SettingsView({
     },
     [onSectionChange],
   );
+  const serverManagedModel = settings?.model_control === "server";
+  useEffect(() => {
+    if (serverManagedModel && activeSection === "models") {
+      selectSection("overview");
+    }
+  }, [activeSection, selectSection, serverManagedModel]);
   const [webSearchKeyVisible, setWebSearchKeyVisible] = useState(false);
   const [webSearchKeyEditing, setWebSearchKeyEditing] = useState(false);
   const [form, setForm] = useState<AgentSettingsDraft>(() =>
@@ -1633,6 +1639,7 @@ export function SettingsView({
           />
         );
       case "models":
+        if (serverManagedModel) return null;
         return (
           <div className="space-y-8">
             <ModelsSettings
@@ -1895,19 +1902,22 @@ export function SettingsView({
           onBackToChat={onBackToChat}
           onLogout={onLogout}
           hostChromeInset={hostChromeInset}
+          hideModels={serverManagedModel}
         />
       ) : null}
 
-      <NewModelConfigurationDialog
-        open={modelConfigurationOpen}
-        draft={modelConfigurationForm}
-        providers={configuredModelProviderOptions}
-        saving={modelConfigurationSaving}
-        showProviderLogos={localPrefs.brandLogos}
-        onOpenChange={setModelConfigurationOpen}
-        onChangeDraft={setModelConfigurationForm}
-        onSave={handleCreateModelConfiguration}
-      />
+      {serverManagedModel ? null : (
+        <NewModelConfigurationDialog
+          open={modelConfigurationOpen}
+          draft={modelConfigurationForm}
+          providers={configuredModelProviderOptions}
+          saving={modelConfigurationSaving}
+          showProviderLogos={localPrefs.brandLogos}
+          onOpenChange={setModelConfigurationOpen}
+          onChangeDraft={setModelConfigurationForm}
+          onSave={handleCreateModelConfiguration}
+        />
+      )}
 
       <NanobotFeatureInstallDialog
         feature={nanobotFeatureConfirm}
@@ -2030,12 +2040,14 @@ function SettingsSidebar({
   onBackToChat,
   onLogout,
   hostChromeInset,
+  hideModels,
 }: {
   activeSection: SettingsSectionKey;
   onSelectSection: (section: SettingsSectionKey) => void;
   onBackToChat: () => void;
   onLogout?: () => void;
   hostChromeInset?: boolean;
+  hideModels?: boolean;
 }) {
   const { t } = useTranslation();
   return (
@@ -2063,26 +2075,30 @@ function SettingsSidebar({
         aria-label={t("settings.sidebar.ariaLabel")}
         className="-mx-1 flex snap-x gap-2 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden lg:mx-0 lg:block lg:space-y-1 lg:overflow-visible lg:px-0 lg:pb-0"
       >
-        {SETTINGS_NAV_ITEMS.map(({ key, icon: Icon, fallback }) => {
-          const active = key === activeSection;
-          return (
-            <button
-              key={key}
-              type="button"
-              aria-current={active ? "page" : undefined}
-              onClick={() => onSelectSection(key)}
-              className={cn(
-                "flex h-9 w-auto shrink-0 snap-start items-center gap-2 rounded-full px-3 text-left text-[13px] font-medium transition-colors lg:w-full lg:rounded-[10px] lg:px-2.5",
-                active
-                  ? "bg-muted/90 text-foreground shadow-[inset_0_0_0_1px_rgba(0,0,0,0.025)]"
-                  : "text-muted-foreground/78 hover:bg-muted/45 hover:text-foreground",
-              )}
-            >
-              <Icon className="h-4 w-4 shrink-0" strokeWidth={2} aria-hidden />
-              <span className="truncate">{t(`settings.nav.${key}`, { defaultValue: fallback })}</span>
-            </button>
-          );
-        })}
+        {SETTINGS_NAV_ITEMS
+          .filter(({ key }) => !(hideModels && key === "models"))
+          .map(({ key, icon: Icon, fallback }) => {
+            const active = key === activeSection;
+            return (
+              <button
+                key={key}
+                type="button"
+                aria-current={active ? "page" : undefined}
+                onClick={() => onSelectSection(key)}
+                className={cn(
+                  "flex h-9 w-auto shrink-0 snap-start items-center gap-2 rounded-full px-3 text-left text-[13px] font-medium transition-colors lg:w-full lg:rounded-[10px] lg:px-2.5",
+                  active
+                    ? "bg-muted/90 text-foreground shadow-[inset_0_0_0_1px_rgba(0,0,0,0.025)]"
+                    : "text-muted-foreground/78 hover:bg-muted/45 hover:text-foreground",
+                )}
+              >
+                <Icon className="h-4 w-4 shrink-0" strokeWidth={2} aria-hidden />
+                <span className="truncate">
+                  {t(`settings.nav.${key}`, { defaultValue: fallback })}
+                </span>
+              </button>
+            );
+          })}
       </nav>
 
       <div className="hidden lg:mt-auto lg:block lg:pt-4">
@@ -2119,14 +2135,19 @@ function OverviewSettings({
   const activeProvider = settings.agent.resolved_provider ?? settings.agent.provider;
   const activeProviderConfigured = settingsProviderConfigured(settings, activeProvider);
   const activeProviderLabel = providerDisplayLabel(settings.providers, activeProvider);
-  const activeModelValue = activeProviderConfigured
-    ? settings.agent.model
-    : tx("settings.values.notConfigured", "Not configured");
-  const activeModelCaption = activeProviderConfigured
-    ? `${activeProvider} · ${activePreset}`
-    : activeProviderLabel || settings.agent.model
-      ? [activeProviderLabel, settings.agent.model].filter(Boolean).join(" · ")
-      : tx("settings.byok.noConfiguredProviders", "No configured providers");
+  const serverManagedModel = settings.model_control === "server";
+  const activeModelValue = serverManagedModel
+    ? tx("settings.values.kangarooModelService", "Kangaroo model service")
+    : activeProviderConfigured
+      ? settings.agent.model
+      : tx("settings.values.notConfigured", "Not configured");
+  const activeModelCaption = serverManagedModel
+    ? tx("settings.values.serverManaged", "Managed by the server")
+    : activeProviderConfigured
+      ? `${activeProvider} · ${activePreset}`
+      : activeProviderLabel || settings.agent.model
+        ? [activeProviderLabel, settings.agent.model].filter(Boolean).join(" · ")
+        : tx("settings.byok.noConfiguredProviders", "No configured providers");
   const webStatus = settings.web.enable
     ? tx("settings.values.enabled", "Enabled")
     : tx("settings.values.disabled", "Disabled");
@@ -2193,12 +2214,12 @@ function OverviewSettings({
         <SettingsGroup>
           <OverviewListRow
             icon={Bot}
-            valueLogoProvider={activeProvider}
+            valueLogoProvider={serverManagedModel ? undefined : activeProvider}
             title={tx("settings.overview.model", "Current model")}
             value={activeModelValue}
             caption={activeModelCaption}
-            showBrandLogos={showBrandLogos}
-            onClick={() => onSelectSection("models")}
+            showBrandLogos={serverManagedModel ? false : showBrandLogos}
+            onClick={serverManagedModel ? undefined : () => onSelectSection("models")}
           />
         </SettingsGroup>
       </section>
@@ -8025,14 +8046,10 @@ function OverviewListRow({
   value: string;
   caption: string;
   showBrandLogos?: boolean;
-  onClick: () => void;
+  onClick?: () => void;
 }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="group flex min-h-[68px] w-full items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-muted/30 sm:px-5"
-    >
+  const content = (
+    <>
       <OverviewRowIcon icon={Icon} />
       <span className="min-w-0 flex-1">
         <span className="block text-[14px] font-medium leading-5 text-foreground">{title}</span>
@@ -8043,11 +8060,31 @@ function OverviewListRow({
         <span className="truncate text-right text-[13px] leading-5 text-muted-foreground">
           {value}
         </span>
-        <ChevronRight
-          className="h-4 w-4 shrink-0 text-muted-foreground/60 transition-transform group-hover:translate-x-0.5"
-          aria-hidden
-        />
+        {onClick ? (
+          <ChevronRight
+            className="h-4 w-4 shrink-0 text-muted-foreground/60 transition-transform group-hover:translate-x-0.5"
+            aria-hidden
+          />
+        ) : null}
       </span>
+    </>
+  );
+
+  if (!onClick) {
+    return (
+      <div className="flex min-h-[68px] w-full items-center gap-3 px-4 py-3.5 text-left sm:px-5">
+        {content}
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="group flex min-h-[68px] w-full items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-muted/30 sm:px-5"
+    >
+      {content}
     </button>
   );
 }

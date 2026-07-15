@@ -20,6 +20,22 @@ class ProviderSnapshot:
     generation: GenerationSettings | None = None
 
 
+def resolve_kangaroo_auth_config(config: Config):
+    """Return enabled Kangaroo WebSocket auth config, if configured."""
+    section = getattr(config.channels, "websocket", None)
+    if section is None:
+        return None
+    if isinstance(section, dict):
+        if section.get("enabled", True) is False:
+            return None
+    elif getattr(section, "enabled", True) is False:
+        return None
+    from nanobot.channels.websocket import WebSocketConfig
+
+    auth_config = WebSocketConfig.model_validate(section).kangaroo_auth
+    return auth_config if auth_config.enabled else None
+
+
 def _resolve_model_preset(
     config: Config,
     *,
@@ -49,6 +65,16 @@ def _make_provider_core(
     """Create a plain LLM provider without failover wrapping."""
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
     model = model or resolved.model
+    if auth_config := resolve_kangaroo_auth_config(config):
+        from nanobot.providers.kangaroo_gateway_provider import KangarooGatewayProvider
+
+        provider = KangarooGatewayProvider(
+            proxy_url=auth_config.llm_proxy_url,
+            default_model=model,
+            connect_timeout_s=auth_config.request_timeout_s,
+        )
+        provider.generation = resolved.to_generation_settings()
+        return provider
     provider_name = config.get_provider_name(model, preset=resolved)
     p = config.get_provider(model, preset=resolved)
     spec = find_by_name(provider_name) if provider_name else None
@@ -184,6 +210,8 @@ def make_provider(
     """
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
     provider = _make_provider_core(config, preset_name=preset_name, preset=preset, model=model)
+    if resolve_kangaroo_auth_config(config):
+        return provider
     fallback_presets = _resolve_fallback_presets(config, resolved)
 
     if fallback_presets:
@@ -206,6 +234,17 @@ def provider_signature(
 ) -> tuple[object, ...]:
     """Return the config fields that affect the active provider chain."""
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
+    if auth_config := resolve_kangaroo_auth_config(config):
+        return (
+            "kangaroo_gateway",
+            auth_config.llm_proxy_url,
+            auth_config.request_timeout_s,
+            resolved.model,
+            resolved.max_tokens,
+            resolved.temperature,
+            resolved.reasoning_effort,
+            resolved.context_window_tokens,
+        )
     p = config.get_provider(resolved.model, preset=resolved)
     fallback_presets = _resolve_fallback_presets(config, resolved)
 
@@ -260,10 +299,14 @@ def build_provider_snapshot(
     preset: ModelPresetConfig | None = None,
 ) -> ProviderSnapshot:
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
-    fallback_windows = [
-        fallback.context_window_tokens
-        for fallback in _resolve_fallback_presets(config, resolved)
-    ]
+    fallback_windows = (
+        []
+        if resolve_kangaroo_auth_config(config)
+        else [
+            fallback.context_window_tokens
+            for fallback in _resolve_fallback_presets(config, resolved)
+        ]
+    )
     return ProviderSnapshot(
         provider=make_provider(config, preset=resolved),
         model=resolved.model,

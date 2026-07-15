@@ -27,10 +27,14 @@ import { logoFallbackUrls } from "@/lib/provider-brand";
 import { cn } from "@/lib/utils";
 import {
   BootstrapAuthRequiredError,
+  clearSessionApiToken,
   consumeUrlHandoff,
   deriveWsUrl,
   fetchBootstrap,
   loginKangaroo,
+  logoutKangaroo,
+  readSessionApiToken,
+  storeSessionApiToken,
 } from "@/lib/bootstrap";
 import { displayTitle } from "@/lib/chat-groups";
 import { deriveTitle } from "@/lib/format";
@@ -785,7 +789,10 @@ function formatPairingExpiry(
 export default function App() {
   const { t } = useTranslation();
   const [state, setState] = useState<BootState>({ status: "loading" });
-  const apiTokenRef = useRef("");
+  const apiTokenRef = useRef<string | null>(null);
+  if (apiTokenRef.current === null) {
+    apiTokenRef.current = readSessionApiToken();
+  }
 
   const refreshReadyClient = useCallback(
     async (client: NanobotClient, fallbackSurface: RuntimeSurface) => {
@@ -793,7 +800,7 @@ export default function App() {
         "",
         undefined,
         "",
-        apiTokenRef.current,
+        apiTokenRef.current || "",
       );
       const url = deriveWsUrl(boot.ws_path, boot.token, boot.ws_url);
       const runtimeSurface = boot.runtime_surface
@@ -818,6 +825,7 @@ export default function App() {
           : current,
       );
       apiTokenRef.current = boot.api_token;
+      storeSessionApiToken(boot.api_token);
       return { token: boot.api_token, url };
     },
     [],
@@ -829,7 +837,10 @@ export default function App() {
       (async () => {
         setState({ status: "loading" });
         try {
-          const boot = await fetchBootstrap("", undefined, handoff);
+          const storedApiToken = handoff ? "" : apiTokenRef.current || "";
+          const boot = storedApiToken
+            ? await fetchBootstrap("", undefined, handoff, storedApiToken)
+            : await fetchBootstrap("", undefined, handoff);
           if (cancelled) return;
           const url = deriveWsUrl(boot.ws_path, boot.token, boot.ws_url);
           const runtimeSurface = toRuntimeSurface(boot.runtime_surface);
@@ -847,6 +858,7 @@ export default function App() {
             },
           });
           apiTokenRef.current = boot.api_token;
+          storeSessionApiToken(boot.api_token);
           client.connect();
           setState({
             status: "ready",
@@ -859,6 +871,8 @@ export default function App() {
         } catch (e) {
           if (cancelled) return;
           if (isBootstrapAuthRequired(e)) {
+            apiTokenRef.current = "";
+            clearSessionApiToken();
             setState({ status: "auth" });
           } else {
             setState({
@@ -955,10 +969,15 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    const apiToken = apiTokenRef.current || "";
+    if (apiToken) {
+      void logoutKangaroo(apiToken).catch(() => undefined);
+    }
     if (state.status === "ready") {
       state.client.close();
     }
     apiTokenRef.current = "";
+    clearSessionApiToken();
     setState({ status: "auth" });
   };
 

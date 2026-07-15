@@ -236,6 +236,23 @@ describe("SettingsView Apps catalog", () => {
     vi.unstubAllGlobals();
   });
 
+  it("hides local model configuration when the server manages the model", async () => {
+    const payload = settingsPayload();
+    payload.model_control = "server";
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(payload)));
+
+    renderSettingsView({
+      initialSection: "overview",
+      initialSettings: payload,
+      showSidebar: true,
+    });
+
+    expect(await screen.findByText("Kangaroo model service")).toBeInTheDocument();
+    expect(screen.getByText("Managed by the server")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Models" })).not.toBeInTheDocument();
+    expect(screen.queryByText("openai/gpt-4o")).not.toBeInTheDocument();
+  });
+
   it("persists the file edit display local preference", async () => {
     renderSettingsView({
       initialSection: "appearance",

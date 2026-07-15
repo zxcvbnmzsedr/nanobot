@@ -2,12 +2,40 @@ import type { BootstrapResponse, KangarooLoginResponse } from "./types";
 import { fetchWithTimeout } from "./http";
 
 const URL_HANDOFF_PARAM = "handoff";
+const SESSION_API_TOKEN_STORAGE_KEY = "nanobot-webui.auth.api-token.v1";
 
 export class BootstrapAuthRequiredError extends Error {
   constructor(message = "Kangaroo account authentication required") {
     super(message);
     this.name = "BootstrapAuthRequiredError";
   }
+}
+
+export function readSessionApiToken(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return window.localStorage.getItem(SESSION_API_TOKEN_STORAGE_KEY)?.trim() || "";
+  } catch {
+    return "";
+  }
+}
+
+export function storeSessionApiToken(token: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    const value = token.trim();
+    if (value) {
+      window.localStorage.setItem(SESSION_API_TOKEN_STORAGE_KEY, value);
+    } else {
+      window.localStorage.removeItem(SESSION_API_TOKEN_STORAGE_KEY);
+    }
+  } catch {
+    // Authentication still works in memory when browser storage is unavailable.
+  }
+}
+
+export function clearSessionApiToken(): void {
+  storeSessionApiToken("");
 }
 
 function basicAuthorization(username: string, password: string): string {
@@ -40,6 +68,20 @@ export async function loginKangaroo(
     throw new Error("login response missing identity handoff");
   }
   return body as KangarooLoginResponse;
+}
+
+export async function logoutKangaroo(apiToken: string, timeoutMs?: number): Promise<void> {
+  const token = apiToken.trim();
+  if (!token) return;
+  const res = await fetchWithTimeout("/api/auth/logout", {
+    method: "GET",
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: { Authorization: `Bearer ${token}` },
+  }, timeoutMs);
+  if (!res.ok && res.status !== 401) {
+    throw new Error(`logout failed: HTTP ${res.status}`);
+  }
 }
 
 export function consumeUrlHandoff(): string {

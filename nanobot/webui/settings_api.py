@@ -24,6 +24,7 @@ from nanobot.audio.transcription_registry import (
 )
 from nanobot.config.loader import get_config_path, load_config, resolve_config_env_vars, save_config
 from nanobot.config.schema import ModelPresetConfig, ProviderConfig
+from nanobot.providers.factory import resolve_kangaroo_auth_config
 from nanobot.providers.image_generation import (
     get_image_gen_provider,
     image_gen_provider_names,
@@ -837,6 +838,7 @@ def settings_payload(
         workspace=config.workspace_path,
     )
     payload = {
+        "model_control": "server" if resolve_kangaroo_auth_config(config) else "local",
         "agent": {
             "model": effective_preset.model,
             "provider": selected_provider,

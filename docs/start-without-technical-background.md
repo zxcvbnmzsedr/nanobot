@@ -217,10 +217,9 @@ Merge them into one object:
 
 ```json
 {
-  "providers": {
-    "custom": {
-      "apiKey": "your-api-key",
-      "apiBase": "https://api.example.com/v1"
+  "agents": {
+    "defaults": {
+      "botName": "nanobot"
     }
   },
   "channels": {
@@ -228,14 +227,15 @@ Merge them into one object:
       "websocketRequiresToken": true,
       "kangarooAuth": {
         "enabled": true,
-        "apiBase": "https://accounts.example.com"
+        "apiBase": "https://accounts.example.com",
+        "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream"
       }
     }
   }
 }
 ```
 
-Notice the comma after the `providers` block. JSON needs commas between sibling sections, but not after the last section. If this feels hard, use `nanobot onboard --wizard` whenever possible.
+Notice the comma after the `agents` block. JSON needs commas between sibling sections, but not after the last section. If this feels hard, use `nanobot onboard --wizard` whenever possible.
 
 ## 6. Manual Setup: Config Fallback
 
@@ -267,25 +267,12 @@ If this is a brand-new install and you have not configured anything else yet, re
 
 ```json
 {
-  "providers": {
-    "custom": {
-      "apiKey": "your-api-key",
-      "apiBase": "https://api.example.com/v1"
-    }
-  },
-  "modelPresets": {
-    "primary": {
-      "label": "Primary",
-      "provider": "custom",
-      "model": "model-id-from-your-provider",
+  "agents": {
+    "defaults": {
+      "model": "kangaroo-managed",
       "maxTokens": 4096,
       "contextWindowTokens": 65536,
       "temperature": 0.1
-    }
-  },
-  "agents": {
-    "defaults": {
-      "modelPreset": "primary"
     }
   },
   "channels": {
@@ -293,14 +280,17 @@ If this is a brand-new install and you have not configured anything else yet, re
       "websocketRequiresToken": true,
       "kangarooAuth": {
         "enabled": true,
-        "apiBase": "https://accounts.example.com"
+        "apiBase": "https://accounts.example.com",
+        "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream"
       }
     }
   }
 }
 ```
 
-Replace `your-api-key`, `https://api.example.com/v1`, `model-id-from-your-provider`, and the Kangaroo account API address with your own values.
+Replace the Kangaroo account API and model proxy addresses with your own values. In Kangaroo mode,
+chat turns do not use a local provider API key or endpoint; the configured proxy owns model
+selection and server-side credentials.
 
 For copyable provider-specific examples, use [`provider-cookbook.md`](./provider-cookbook.md).
 

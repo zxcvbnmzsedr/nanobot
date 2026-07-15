@@ -240,6 +240,8 @@
       "fullAccess": "完全訪問權限",
       "configured": "已配置",
       "notConfigured": "未配置",
+      "kangarooModelService": "袋鼠模型服務",
+      "serverManaged": "由服務端統一管理",
       "pending": "等待中",
       "restartingEngine": "正在重啟"
     },
@@ -1011,6 +1013,7 @@
       "send": "送出訊息",
       "stop": "停止回覆",
       "modelNotConfigured": "模型未配置",
+      "kangarooModelService": "袋鼠模型服務",
       "configureModel": "配置模型",
       "queued": {
         "label": "待引導提示",

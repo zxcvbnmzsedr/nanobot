@@ -404,9 +404,15 @@ export function ThreadShell({
     () => toModelBadgeInfo(modelName, settings),
     [modelName, settings],
   );
-  const modelBadgeLabel = modelBadge.needsSetup
-    ? t("thread.composer.modelNotConfigured", { defaultValue: "Model not configured" })
-    : modelBadge.label;
+  const serverManagedModel = settings?.model_control === "server";
+  const modelBadgeLabel = serverManagedModel
+    ? t("thread.composer.kangarooModelService", { defaultValue: "Kangaroo model service" })
+    : modelBadge.needsSetup
+      ? t("thread.composer.modelNotConfigured", { defaultValue: "Model not configured" })
+      : modelBadge.label;
+  const modelBadgeProvider = serverManagedModel ? null : modelBadge.provider;
+  const modelBadgeProviderLabel = serverManagedModel ? null : modelBadge.providerLabel;
+  const modelBadgeNeedsSetup = serverManagedModel ? false : modelBadge.needsSetup;
   useEffect(() => {
     if (showHeroComposer && !wasShowingHeroComposerRef.current) {
       setHeroGreetingKey(randomHeroGreetingKey());
@@ -733,10 +739,10 @@ export function ThreadShell({
               : t("thread.composer.placeholderThread")
           }
           modelLabel={modelBadgeLabel}
-          modelProvider={modelBadge.provider}
-          modelProviderLabel={modelBadge.providerLabel}
-          modelNeedsSetup={modelBadge.needsSetup}
-          onModelBadgeClick={modelBadge.needsSetup ? onOpenModelSettings : undefined}
+          modelProvider={modelBadgeProvider}
+          modelProviderLabel={modelBadgeProviderLabel}
+          modelNeedsSetup={modelBadgeNeedsSetup}
+          onModelBadgeClick={modelBadgeNeedsSetup ? onOpenModelSettings : undefined}
           variant={showHeroComposer ? "hero" : "thread"}
           slashCommands={slashCommands}
           cliApps={cliApps}
@@ -766,10 +772,10 @@ export function ThreadShell({
               : t("thread.composer.placeholderHero")
           }
           modelLabel={modelBadgeLabel}
-          modelProvider={modelBadge.provider}
-          modelProviderLabel={modelBadge.providerLabel}
-          modelNeedsSetup={modelBadge.needsSetup}
-          onModelBadgeClick={modelBadge.needsSetup ? onOpenModelSettings : undefined}
+          modelProvider={modelBadgeProvider}
+          modelProviderLabel={modelBadgeProviderLabel}
+          modelNeedsSetup={modelBadgeNeedsSetup}
+          onModelBadgeClick={modelBadgeNeedsSetup ? onOpenModelSettings : undefined}
           variant="hero"
           slashCommands={slashCommands}
           cliApps={cliApps}

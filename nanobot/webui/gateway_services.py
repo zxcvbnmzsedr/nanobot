@@ -9,6 +9,7 @@ from typing import Any, Callable
 from loguru import logger as default_logger
 
 from nanobot.config.paths import get_data_dir
+from nanobot.identity.credentials import get_kangaroo_credential_store
 from nanobot.identity.handoff import HandoffStore
 from nanobot.identity.kangaroo import KangarooIdentityVerifier
 from nanobot.identity.runtime import TenantRuntimeStore
@@ -71,12 +72,20 @@ def build_gateway_services(
             api_base=auth_config.api_base,
             user_info_path=auth_config.user_info_path,
             login_path=auth_config.upstream_login_path,
+            refresh_path=auth_config.upstream_refresh_path,
             timeout_s=auth_config.request_timeout_s,
             allowed_user_ids={str(value).strip() for value in auth_config.allowed_user_ids},
         )
         if auth_config.enabled
         else None
     )
+    credential_store = get_kangaroo_credential_store()
+    if identity_verifier is not None:
+        credential_store.configure(
+            persistence_path=runtime_root / ".kangaroo-credentials.enc",
+            refresher=identity_verifier.refresh,
+            refresh_skew_s=auth_config.refresh_skew_s,
+        )
     media = WebUIMediaGateway(
         workspace_path=workspace_path,
         logger=logger,
@@ -98,6 +107,7 @@ def build_gateway_services(
         tokens=tokens,
         handoffs=handoffs,
         identity_verifier=identity_verifier,
+        credential_store=credential_store,
         tenant_runtimes=tenant_runtimes,
         media=media,
         workspaces=workspaces,

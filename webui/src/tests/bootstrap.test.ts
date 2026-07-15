@@ -1,17 +1,33 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  BootstrapAuthRequiredError,
+  clearSessionApiToken,
   consumeUrlHandoff,
   deriveWsUrl,
   fetchBootstrap,
   loginKangaroo,
+  logoutKangaroo,
+  readSessionApiToken,
+  storeSessionApiToken,
 } from "@/lib/bootstrap";
 
 describe("bootstrap helpers", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+  });
+
+  it("shares the short-lived API token through localStorage", () => {
+    storeSessionApiToken(" api-token ");
+
+    expect(readSessionApiToken()).toBe("api-token");
+    expect(window.localStorage.getItem("nanobot-webui.auth.api-token.v1")).toBe("api-token");
+    expect(window.sessionStorage.getItem("nanobot-webui.auth.api-token.v1")).toBeNull();
+
+    clearSessionApiToken();
+    expect(readSessionApiToken()).toBe("");
   });
 
   it("prefers the server-provided websocket URL over the current dev host", () => {
@@ -114,6 +130,23 @@ describe("bootstrap helpers", () => {
     expect(options.headers.Authorization).toMatch(/^Basic /);
     expect(String(url)).not.toContain("13800138000");
     expect(String(url)).not.toContain("secret-password");
+  });
+
+  it("logs out with the identity-bound API token", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await logoutKangaroo("api-token");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/auth/logout",
+      expect.objectContaining({
+        method: "GET",
+        headers: { Authorization: "Bearer api-token" },
+      }),
+    );
   });
 
   it("maps a rejected Kangaroo bootstrap to account authentication", async () => {

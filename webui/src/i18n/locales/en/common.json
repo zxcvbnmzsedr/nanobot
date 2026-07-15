@@ -355,6 +355,8 @@
       "fullAccess": "Full Access",
       "configured": "Configured",
       "notConfigured": "Not configured",
+      "kangarooModelService": "Kangaroo model service",
+      "serverManaged": "Managed by the server",
       "pending": "Pending",
       "restartingEngine": "Restarting"
     },
@@ -1025,6 +1027,7 @@
       "send": "Send message",
       "stop": "Stop response",
       "modelNotConfigured": "Model not configured",
+      "kangarooModelService": "Kangaroo model service",
       "configureModel": "Configure model",
       "queued": {
         "label": "Queued guidance",

@@ -28,6 +28,7 @@ from websockets.http11 import Response
 from nanobot.command.builtin import builtin_command_palette
 from nanobot.cron.session_turns import is_bound_cron_job
 from nanobot.cron.types import CronJob, CronSchedule
+from nanobot.identity.credentials import KangarooCredentialStore
 from nanobot.identity.handoff import HandoffStore
 from nanobot.identity.kangaroo import KangarooIdentityError, KangarooIdentityVerifier
 from nanobot.identity.principal import Principal
@@ -188,6 +189,7 @@ class GatewayHTTPHandler:
         tokens: GatewayTokenStore,
         handoffs: HandoffStore,
         identity_verifier: KangarooIdentityVerifier | None,
+        credential_store: KangarooCredentialStore,
         tenant_runtimes: TenantRuntimeStore,
         media: WebUIMediaGateway,
         workspaces: WebUIWorkspaceController,
@@ -208,6 +210,7 @@ class GatewayHTTPHandler:
         self.tokens = tokens
         self.handoffs = handoffs
         self.identity_verifier = identity_verifier
+        self.credential_store = credential_store
         self.tenant_runtimes = tenant_runtimes
         self._login_attempts: dict[str, list[float]] = {}
         self.media = media
@@ -286,6 +289,8 @@ class GatewayHTTPHandler:
             return await self._handle_kangaroo_login(connection, request)
         if auth_config.enabled and got == auth_config.exchange_path:
             return await self._handle_kangaroo_exchange(request)
+        if auth_config.enabled and got == auth_config.logout_path:
+            return self._handle_kangaroo_logout(request)
 
         if self.api_principal(request) is not None and got.startswith("/api/settings/"):
             return _http_error(403, "Account runtimes cannot modify gateway settings")
@@ -381,8 +386,10 @@ class GatewayHTTPHandler:
                 status=401,
             )
         try:
-            principal = await self.identity_verifier.login(*credentials)
+            identity = await self.identity_verifier.login_with_access_token(*credentials)
+            principal = identity.principal
             code = self.handoffs.issue(principal, self.config.kangaroo_auth.handoff_ttl_s)
+            self.credential_store.put_identity(identity)
         except KangarooIdentityError as exc:
             self._log.info("Kangaroo account login rejected: {}", exc)
             return _no_store_json_response(
@@ -411,6 +418,7 @@ class GatewayHTTPHandler:
         try:
             principal = await self.identity_verifier.verify(access_token)
             code = self.handoffs.issue(principal, self.config.kangaroo_auth.handoff_ttl_s)
+            self.credential_store.put(principal, access_token)
         except KangarooIdentityError as exc:
             self._log.info("Kangaroo token exchange rejected: {}", exc)
             return _http_error(exc.http_status, str(exc))
@@ -421,6 +429,14 @@ class GatewayHTTPHandler:
             "expires_in": self.config.kangaroo_auth.handoff_ttl_s,
             "user": principal.public_payload(),
         })
+
+    def _handle_kangaroo_logout(self, request: WsRequest) -> Response:
+        principal = self.api_principal(request)
+        if principal is None:
+            return _http_error(401, "Kangaroo account authentication required")
+        self.credential_store.remove(principal.user_scope)
+        self.tokens.revoke_principal(principal)
+        return _no_store_json_response({"ok": True})
 
     def _handle_bootstrap(self, connection: Any, request: Any) -> Response:
         handoff = _case_insensitive_header(request.headers, "X-Nanobot-Handoff")

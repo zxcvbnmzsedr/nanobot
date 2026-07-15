@@ -44,7 +44,8 @@ External access requires Kangaroo account authentication:
       "websocketRequiresToken": true,
       "kangarooAuth": {
         "enabled": true,
-        "apiBase": "https://accounts.example.com"
+        "apiBase": "https://accounts.example.com",
+        "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream"
       }
     }
   }
@@ -219,7 +220,8 @@ channel to all interfaces and enable Kangaroo authentication:
       "port": 8765,
       "kangarooAuth": {
         "enabled": true,
-        "apiBase": "https://accounts.example.com"
+        "apiBase": "https://accounts.example.com",
+        "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream"
       }
     }
   }

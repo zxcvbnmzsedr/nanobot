@@ -2,8 +2,8 @@
 
 Nanobot provides a native Kangaroo account login and can also exchange an existing Kangaroo access
 token for a one-time browser handoff. Password login is handled by the nanobot gateway; the browser
-never connects to `quotation-god`, and nanobot does not store the password or Kangaroo access and
-refresh tokens.
+never connects to `quotation-god`. Nanobot never stores passwords. It encrypts the current access and
+refresh tokens in the active instance's runtime directory so unattended tasks survive restarts.
 
 ## Gateway configuration
 
@@ -20,12 +20,16 @@ Configure the WebSocket channel in `~/.nanobot/config.json`:
       "kangarooAuth": {
         "enabled": true,
         "apiBase": "https://api.example.com/",
+        "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
         "userInfoPath": "api/auth/userInfo",
         "loginPath": "/api/auth/login",
+        "logoutPath": "/api/auth/logout",
         "upstreamLoginPath": "api/auth/oauth/login",
+        "upstreamRefreshPath": "api/auth/oauth/token",
         "exchangePath": "/api/auth/exchange",
         "handoffTtlS": 60,
         "requestTimeoutS": 10,
+        "refreshSkewS": 3600,
         "allowedUserIds": [],
         "runtimeRoot": "~/.nanobot/tenants"
       }
@@ -53,8 +57,16 @@ placed in the URL. Production deployments must expose this route through HTTPS.
 
 Nanobot applies the upstream Kangaroo login contract, including its historical password digest,
 then calls `api/auth/userInfo` before creating a trusted identity. The raw password and Kangaroo
-access/refresh tokens are not written to disk or returned to the browser. The browser receives only
-short-lived nanobot credentials and refreshes those while the page session remains active.
+tokens are never returned to the browser. The access and refresh tokens are stored in an encrypted,
+permission-restricted vault at `<runtimeRoot>/.kangaroo-credentials.enc`; its generated key file is
+permission-restricted as well. Set `NANOBOT_KANGAROO_CREDENTIAL_KEY` to a Fernet key when deployment
+policy requires the encryption key to come from a secret manager instead of a local key file.
+
+Before each model call, nanobot refreshes credentials that expire within `refreshSkewS`. Concurrent
+requests for the same user share one refresh operation. If the model proxy rejects a token with 401,
+nanobot refreshes and retries the complete request once. A transient account-service failure keeps
+the encrypted credential for the next attempt; an invalid refresh token clears it and requires login.
+The browser's short-lived nanobot credentials are refreshed independently while the page is active.
 
 ## Existing-token handoff
 
@@ -75,6 +87,20 @@ https://nanobot.example.com/#/new?handoff=<handoff_code>
 
 The WebUI removes the code from the address bar immediately and exchanges it for identity-bound
 API and WebSocket tokens. The Kangaroo access token never enters WebUI storage.
+
+An access-token-only handoff cannot be refreshed because it does not provide a refresh token. Use
+native WebUI login for unattended work that must outlive the supplied access token.
+
+## Model proxy
+
+When Kangaroo authentication is enabled, `llmProxyUrl` is required. Nanobot ignores legacy provider
+API keys and endpoints for chat turns and sends each request to this URL with the current user's
+Kangaroo access token. The proxy verifies the token again, derives `userId` and `orgId` from
+`api/auth/userInfo`, and calls the server-managed model. Nanobot does not issue a separate AI
+session token.
+
+Signing out through the WebUI calls `/api/auth/logout`, removes the persisted OAuth bundle, and
+revokes all outstanding nanobot browser and WebSocket grants for that identity.
 
 ## Isolation layout
 

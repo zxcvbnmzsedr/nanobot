@@ -14,7 +14,7 @@ from nanobot.agent.subagent import (
     SubagentStatus,
     _SubagentHook,
 )
-from nanobot.agent.tools.context import current_request_context
+from nanobot.agent.tools.context import RequestContext, current_request_context, request_context
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import GenerationSettings, LLMProvider
 from nanobot.utils.llm_runtime import LLMRuntime
@@ -304,6 +304,7 @@ class TestSpawn:
             seen["spec_runtime"] = spec.runtime
             request_ctx = current_request_context()
             seen["context_runtime"] = request_ctx.runtime if request_ctx else None
+            seen["context_metadata"] = request_ctx.metadata if request_ctx else None
             entered.set()
             await release.wait()
             return AgentRunResult(
@@ -313,7 +314,13 @@ class TestSpawn:
             )
 
         sm.runner.run = observe
-        await sm.spawn("task", runtime=runtime, session_key="s1")
+        with request_context(RequestContext(
+            channel="websocket",
+            chat_id="chat-1",
+            runtime=runtime,
+            metadata={"nanobot_identity": {"user_scope": "scope-1"}},
+        )):
+            await sm.spawn("task", runtime=runtime, session_key="s1")
         runtime.provider.generation = GenerationSettings(
             temperature=0.9,
             max_tokens=128,
@@ -322,6 +329,9 @@ class TestSpawn:
 
         assert seen["spec_runtime"] is runtime
         assert seen["context_runtime"] is runtime
+        assert seen["context_metadata"] == {
+            "nanobot_identity": {"user_scope": "scope-1"}
+        }
         assert runtime.generation.temperature == 0.2
 
         release.set()

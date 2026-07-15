@@ -9,7 +9,9 @@ from websockets.http11 import Request
 from nanobot.agent.context import ContextBuilder
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.websocket import WebSocketConfig
+from nanobot.identity.credentials import get_kangaroo_credential_store
 from nanobot.identity.handoff import HandoffStore
+from nanobot.identity.kangaroo import AuthenticatedKangarooIdentity
 from nanobot.identity.principal import IDENTITY_METADATA_KEY, Principal
 from nanobot.identity.runtime import TenantRuntimeStore
 from nanobot.webui.gateway_services import build_gateway_services
@@ -109,6 +111,17 @@ def test_kangaroo_auth_rejects_principal_bypass_config(
             "kangarooAuth": {
                 "enabled": True,
                 "apiBase": "https://accounts.example.com/",
+                "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+            },
+        })
+
+
+def test_kangaroo_auth_requires_llm_proxy_url() -> None:
+    with pytest.raises(ValueError, match="llm_proxy_url"):
+        WebSocketConfig.model_validate({
+            "kangarooAuth": {
+                "enabled": True,
+                "apiBase": "https://accounts.example.com/",
             },
         })
 
@@ -120,6 +133,7 @@ async def test_exchange_and_bootstrap_keep_the_verified_identity(tmp_path: Path)
         "kangarooAuth": {
             "enabled": True,
             "apiBase": "https://accounts.example.com/",
+            "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
             "runtimeRoot": str(tmp_path / "tenants"),
         },
     })
@@ -135,6 +149,8 @@ async def test_exchange_and_bootstrap_keep_the_verified_identity(tmp_path: Path)
         runtime_capabilities_overrides=None,
     )
     principal = _principal()
+    credential_store = get_kangaroo_credential_store()
+    credential_store.clear()
 
     class Verifier:
         async def verify(self, access_token: str) -> Principal:
@@ -165,6 +181,8 @@ async def test_exchange_and_bootstrap_keep_the_verified_identity(tmp_path: Path)
     assert bootstrap.headers["Cache-Control"] == "no-store"
     grant = gateway.tokens.take_issued_grant_if_valid(bootstrap_body["token"])
     assert grant is not None and grant.principal == principal
+    assert credential_store.get(principal.user_scope) == "kangaroo-token"
+    credential_store.clear()
 
 
 @pytest.mark.asyncio
@@ -176,6 +194,7 @@ async def test_native_login_returns_identity_handoff_without_upstream_tokens(
         "kangarooAuth": {
             "enabled": True,
             "apiBase": "https://accounts.example.com/",
+            "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
             "runtimeRoot": str(tmp_path / "tenants"),
         },
     })
@@ -191,11 +210,17 @@ async def test_native_login_returns_identity_handoff_without_upstream_tokens(
         runtime_capabilities_overrides=None,
     )
     principal = _principal()
+    credential_store = get_kangaroo_credential_store()
+    credential_store.clear()
 
     class Verifier:
-        async def login(self, username: str, password: str) -> Principal:
+        async def login_with_access_token(
+            self,
+            username: str,
+            password: str,
+        ) -> AuthenticatedKangarooIdentity:
             assert (username, password) == ("13800138000", "secret-password")
-            return principal
+            return AuthenticatedKangarooIdentity(principal, "native-login-token")
 
     class RemoteConnection:
         remote_address = ("203.0.113.10", 1234)
@@ -214,6 +239,31 @@ async def test_native_login_returns_identity_handoff_without_upstream_tokens(
     assert body["handoff_code"].startswith("nbho_")
     assert "access_token" not in body
     assert "refresh_token" not in body
+    assert credential_store.get(principal.user_scope) == "native-login-token"
+
+    bootstrap = gateway.http._handle_bootstrap(
+        RemoteConnection(),
+        Request(
+            "/webui/bootstrap",
+            Headers({"X-Nanobot-Handoff": body["handoff_code"]}),
+        ),
+    )
+    api_token = json.loads(bootstrap.body)["api_token"]
+    logout = gateway.http._handle_kangaroo_logout(
+        Request(
+            "/api/auth/logout",
+            Headers({"Authorization": f"Bearer {api_token}"}),
+        )
+    )
+    assert logout.status_code == 200
+    assert credential_store.get(principal.user_scope) is None
+    assert not gateway.tokens.check_api_token(
+        Request(
+            "/api/sessions",
+            Headers({"Authorization": f"Bearer {api_token}"}),
+        )
+    )
+    credential_store.clear()
 
 
 def test_kangaroo_mode_disables_localhost_bootstrap_bypass(tmp_path: Path) -> None:
@@ -221,6 +271,7 @@ def test_kangaroo_mode_disables_localhost_bootstrap_bypass(tmp_path: Path) -> No
         "kangarooAuth": {
             "enabled": True,
             "apiBase": "https://accounts.example.com/",
+            "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
             "runtimeRoot": str(tmp_path / "tenants"),
         },
     })

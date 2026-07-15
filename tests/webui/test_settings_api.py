@@ -79,6 +79,39 @@ def test_settings_payload_includes_relocated_capabilities(
     assert payload["observability"]["configured"] is True
 
 
+def test_settings_payload_marks_kangaroo_model_as_server_managed(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config.model_validate({
+        "channels": {
+            "websocket": {
+                "kangarooAuth": {
+                    "enabled": True,
+                    "apiBase": "https://accounts.example.com",
+                    "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+                },
+            },
+        },
+    })
+    save_config(config, config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    assert settings_payload()["model_control"] == "server"
+
+
+def test_settings_payload_marks_default_model_as_locally_managed(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    assert settings_payload()["model_control"] == "local"
+
+
 def test_update_api_settings_requires_key_for_network_access(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

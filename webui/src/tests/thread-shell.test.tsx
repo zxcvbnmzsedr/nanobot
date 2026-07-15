@@ -325,6 +325,32 @@ describe("ThreadShell", () => {
     expect(client.sendMessage).not.toHaveBeenCalled();
   });
 
+  it("shows a read-only Kangaroo service badge for server-managed models", async () => {
+    const client = makeClient();
+    const settings = modelSettings("openai-codex/gpt-5.1-codex", "openai_codex");
+    settings.model_control = "server";
+    const onOpenModelSettings = vi.fn();
+
+    render(
+      wrap(
+        client,
+        <ThreadShell
+          session={session("server-managed-model")}
+          title="Server managed model"
+          onToggleSidebar={() => {}}
+          settingsSnapshot={settings}
+          onOpenModelSettings={onOpenModelSettings}
+        />,
+        "openai-codex/gpt-5.1-codex",
+      ),
+    );
+
+    expect(await screen.findByText("Kangaroo model service")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Kangaroo model service" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("composer-model-logo-openai_codex")).not.toBeInTheDocument();
+    expect(onOpenModelSettings).not.toHaveBeenCalled();
+  });
+
   it("keeps image generation controls out of the composer", async () => {
     const client = makeClient();
     const disabledSettings = modelSettings("deepseek-v4-pro", "deepseek");

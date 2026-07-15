@@ -82,6 +82,14 @@ class GatewayTokenStore:
         self.issued_tokens.clear()
         self.api_tokens.clear()
 
+    def revoke_principal(self, principal: Principal) -> None:
+        """Revoke every outstanding browser and WebSocket grant for an identity."""
+        for store in (self.issued_tokens, self.api_tokens):
+            for token_key, value in list(store.items()):
+                grant = self._as_grant(value)
+                if grant is not None and grant.principal == principal:
+                    store.pop(token_key, None)
+
     def _purge_expired_api_tokens(self) -> None:
         now = time.monotonic()
         for token_key, value in list(self.api_tokens.items()):

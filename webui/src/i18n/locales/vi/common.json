@@ -240,6 +240,8 @@
       "fullAccess": "Toàn quyền",
       "configured": "Đã cấu hình",
       "notConfigured": "Chưa cấu hình",
+      "kangarooModelService": "Dịch vụ mô hình Kangaroo",
+      "serverManaged": "Do máy chủ quản lý",
       "pending": "Đang chờ",
       "restartingEngine": "Đang khởi động lại"
     },
@@ -1011,6 +1013,7 @@
       "send": "Gửi tin nhắn",
       "stop": "Dừng phản hồi",
       "modelNotConfigured": "Chưa cấu hình mô hình",
+      "kangarooModelService": "Dịch vụ mô hình Kangaroo",
       "configureModel": "Cấu hình mô hình",
       "queued": {
         "label": "Hướng dẫn đang chờ",
