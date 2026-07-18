@@ -306,6 +306,23 @@ def enable_feishu_instance_config(
     write_config_data(config_path, data)
 
 
+def enable_weixin_instance_config(
+    config_path: Path,
+    defaults: dict[str, Any],
+    *,
+    instance_id: str = DEFAULT_INSTANCE_ID,
+) -> None:
+    from nanobot.channels._weixin_instances import set_weixin_instance_enabled
+
+    data = read_config_data(config_path)
+    channels = data.setdefault("channels", {})
+    existing = channels.get("weixin", {})
+    if not isinstance(existing, dict):
+        existing = {}
+    channels["weixin"] = set_weixin_instance_enabled(existing, defaults, instance_id, True)
+    write_config_data(config_path, data)
+
+
 def disable_channel_config(config_path: Path, channel_name: str) -> None:
     data = read_config_data(config_path)
     channels = data.setdefault("channels", {})
@@ -332,12 +349,34 @@ def disable_feishu_instance_config(
     write_config_data(config_path, data)
 
 
+def disable_weixin_instance_config(
+    config_path: Path,
+    defaults: dict[str, Any],
+    *,
+    instance_id: str = DEFAULT_INSTANCE_ID,
+) -> None:
+    from nanobot.channels._weixin_instances import set_weixin_instance_enabled
+
+    data = read_config_data(config_path)
+    channels = data.setdefault("channels", {})
+    existing = channels.get("weixin", {})
+    if not isinstance(existing, dict):
+        existing = {}
+    channels["weixin"] = set_weixin_instance_enabled(existing, defaults, instance_id, False)
+    write_config_data(config_path, data)
+
+
 def channel_enabled(config: Config, name: str) -> bool:
     section = getattr(config.channels, name, None)
     if name == "feishu":
         from nanobot.channels.feishu import FeishuChannel
 
         return bool(feishu_instance_specs(section, FeishuChannel.default_config(), enabled_only=True))
+    if name == "weixin":
+        from nanobot.channels._weixin_instances import weixin_instance_specs
+        from nanobot.channels.weixin import WeixinChannel
+
+        return bool(weixin_instance_specs(section, WeixinChannel.default_config(), enabled_only=True))
     default_enabled = name in DEFAULT_ENABLED_CHANNELS
     if section is None:
         return default_enabled
@@ -380,17 +419,17 @@ def _local_login_state_present(section: Any, name: str) -> bool:
     from nanobot.config.loader import get_config_path
 
     if name == "weixin":
-        configured_dir = channel_field_value(section, "stateDir")
-        state_dir = (
-            Path(str(configured_dir)).expanduser()
-            if configured_dir
-            else get_config_path().parent / "weixin"
+        from nanobot.channels._weixin_instances import (
+            instance_has_login_state,
+            weixin_instance_specs,
         )
-        try:
-            payload = json.loads((state_dir / "account.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            return False
-        return bool(str(payload.get("token") or "").strip())
+        from nanobot.channels.weixin import WeixinChannel
+
+        default_root = get_config_path().parent / "weixin"
+        return any(
+            instance_has_login_state(spec.config, default_root)
+            for spec in weixin_instance_specs(section, WeixinChannel.default_config())
+        )
 
     if name == "whatsapp":
         configured_path = channel_field_value(section, "databasePath")
@@ -443,7 +482,7 @@ def optional_features_payload(
     last_action: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from nanobot.channels.registry import discover_channel_names, discover_plugins
-    from nanobot.config.loader import load_config
+    from nanobot.config.loader import get_config_path, load_config
 
     config_provided = config is not None
     config = config or load_config()
@@ -505,6 +544,28 @@ def optional_features_payload(
                     "app_id": spec.config.get("appId") or spec.config.get("app_id") or "",
                     "group_policy": spec.config.get("groupPolicy") or "mention",
                     "allow_from": list(spec.config.get("allowFrom") or []),
+                }
+                for spec in specs
+            ]
+        if name == "weixin" and is_channel:
+            from nanobot.channels._weixin_instances import (
+                instance_has_login_state,
+                weixin_instance_specs,
+            )
+            from nanobot.channels.weixin import WeixinChannel
+
+            default_root = get_config_path().parent / "weixin"
+            specs = weixin_instance_specs(
+                getattr(config.channels, "weixin", None),
+                WeixinChannel.default_config(),
+            )
+            feature["instances"] = [
+                {
+                    "id": spec.instance_id,
+                    "name": spec.config.get("name") or "WeChat account",
+                    "enabled": bool(spec.config.get("enabled", False)),
+                    "configured": instance_has_login_state(spec.config, default_root),
+                    "account_id": spec.config.get("accountId") or "",
                 }
                 for spec in specs
             ]
@@ -580,6 +641,18 @@ def enable_optional_feature(
             ) from exc
         if name == "feishu":
             enable_feishu_instance_config(config_path, channel_cls.default_config(), instance_id=instance_id)
+        elif name == "weixin":
+            existing = read_config_data(config_path).get("channels", {}).get("weixin", {})
+            if instance_id != DEFAULT_INSTANCE_ID or (
+                isinstance(existing, dict) and isinstance(existing.get("instances"), list)
+            ):
+                enable_weixin_instance_config(
+                    config_path,
+                    channel_cls.default_config(),
+                    instance_id=instance_id,
+                )
+            else:
+                enable_channel_config(config_path, name, channel_cls.default_config())
         else:
             enable_channel_config(config_path, name, channel_cls.default_config())
         message = f"Enabled channel '{name}'"
@@ -630,6 +703,21 @@ def disable_optional_feature(
 
         channel_cls = load_channel_class(name)
         disable_feishu_instance_config(config_path, channel_cls.default_config(), instance_id=instance_id)
+    elif name == "weixin":
+        from nanobot.channels.registry import load_channel_class
+
+        channel_cls = load_channel_class(name)
+        existing = read_config_data(config_path).get("channels", {}).get("weixin", {})
+        if instance_id != DEFAULT_INSTANCE_ID or (
+            isinstance(existing, dict) and isinstance(existing.get("instances"), list)
+        ):
+            disable_weixin_instance_config(
+                config_path,
+                channel_cls.default_config(),
+                instance_id=instance_id,
+            )
+        else:
+            disable_channel_config(config_path, name)
     else:
         disable_channel_config(config_path, name)
     payload = optional_features_payload(

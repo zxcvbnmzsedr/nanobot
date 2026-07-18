@@ -100,6 +100,13 @@ export function useSessions(): {
     });
   }, [client, refresh]);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "hidden") void refresh();
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
+
   const createChat = useCallback(async (workspaceScope?: WorkspaceScopePayload | null): Promise<string> => {
     const chatId = await client.newChat(CHAT_CREATE_TIMEOUT_MS, workspaceScope);
     const key = `websocket:${chatId}`;

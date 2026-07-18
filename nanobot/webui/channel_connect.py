@@ -13,7 +13,9 @@ import httpx
 
 from nanobot.channels import feishu
 from nanobot.channels._feishu_instances import DEFAULT_INSTANCE_ID, validate_instance_id
-from nanobot.config.loader import load_config
+from nanobot.channels._weixin_instances import upsert_weixin_instance, weixin_instance_specs
+from nanobot.config.loader import get_config_path, load_config
+from nanobot.optional_features import read_config_data, write_config_data
 
 
 class ChannelConnectError(Exception):
@@ -209,6 +211,7 @@ def _pending_payload(session: FeishuConnectSession) -> dict[str, Any]:
 @dataclass(slots=True)
 class WeixinConnectSession:
     id: str
+    instance_id: str
     qrcode_id: str
     qr_url: str
     channel: Any
@@ -229,10 +232,24 @@ class WeixinConnectStore:
     def __init__(self) -> None:
         self._sessions: dict[str, WeixinConnectSession] = {}
 
-    async def start(self, *, force: bool = False) -> dict[str, Any]:
+    async def start(
+        self,
+        *,
+        force: bool = False,
+        instance_id: str = DEFAULT_INSTANCE_ID,
+        mode: str = "replace",
+    ) -> dict[str, Any]:
         await self._cleanup()
 
-        channel = self._build_channel()
+        if mode == "create":
+            instance_id = f"account-{secrets.token_hex(3)}"
+        else:
+            try:
+                instance_id = validate_instance_id(instance_id or DEFAULT_INSTANCE_ID)
+            except ValueError as exc:
+                raise ChannelConnectError(str(exc), status=400) from exc
+
+        channel = self._build_channel(instance_id, create=mode == "create")
         if force:
             # Start a fresh login flow without touching the currently working
             # account.  A confirmed scan replaces it via _save_state;
@@ -242,6 +259,7 @@ class WeixinConnectStore:
         elif channel._load_state():
             return {
                 "session_id": "",
+                "instance_id": instance_id,
                 "status": "succeeded",
                 "message": "WeChat is already connected.",
                 "interval_ms": 2000,
@@ -262,6 +280,7 @@ class WeixinConnectStore:
         now_wall = time.time()
         self._sessions[session_id] = WeixinConnectSession(
             id=session_id,
+            instance_id=instance_id,
             qrcode_id=qrcode_id,
             qr_url=qr_url,
             channel=channel,
@@ -317,13 +336,23 @@ class WeixinConnectStore:
                 }
             base_url = str(status_data.get("baseurl", "") or "")
             session.channel._token = token
+            session.channel._get_updates_buf = ""
+            session.channel._context_tokens.clear()
+            session.channel._context_token_at.clear()
+            session.channel._typing_tickets.clear()
             if base_url:
                 session.channel.config.base_url = base_url
             session.channel._save_state()
+            self._save_instance_config(
+                session.instance_id,
+                session.channel,
+                account_id=str(status_data.get("ilink_user_id", "") or ""),
+            )
             self._sessions.pop(session_id, None)
             await self._close_channel(session.channel)
             return {
                 "session_id": session_id,
+                "instance_id": session.instance_id,
                 "status": "succeeded",
                 "message": "WeChat is connected.",
                 "account": str(status_data.get("ilink_user_id", "") or ""),
@@ -373,6 +402,7 @@ class WeixinConnectStore:
             await self._close_channel(session.channel)
         return {
             "session_id": session_id,
+            "instance_id": session.instance_id if session else DEFAULT_INSTANCE_ID,
             "status": "cancelled",
             "message": "WeChat login cancelled.",
         }
@@ -390,18 +420,46 @@ class WeixinConnectStore:
                 await self._close_channel(session.channel)
 
     @staticmethod
-    def _build_channel() -> Any:
+    def _build_channel(instance_id: str, *, create: bool = False) -> Any:
         from nanobot.bus.queue import MessageBus
         from nanobot.channels.weixin import WeixinChannel
 
         section = getattr(load_config().channels, "weixin", None)
-        if hasattr(section, "model_dump"):
-            config = section.model_dump(mode="json", by_alias=True)
-        elif isinstance(section, dict):
-            config = dict(section)
+        specs = weixin_instance_specs(section, WeixinChannel.default_config())
+        selected = next((spec for spec in specs if spec.instance_id == instance_id), None)
+        if selected is not None:
+            config = dict(selected.config)
+        elif create:
+            config = WeixinChannel.default_config()
+            config["stateDir"] = str(
+                get_config_path().parent / "weixin" / "accounts" / instance_id
+            )
         else:
-            config = {}
+            raise ChannelConnectError(f"Unknown WeChat account: {instance_id}", status=404)
         return WeixinChannel(config, MessageBus())
+
+    @staticmethod
+    def _save_instance_config(instance_id: str, channel: Any, *, account_id: str) -> None:
+        from nanobot.channels.weixin import WeixinChannel
+
+        config_path = get_config_path()
+        data = read_config_data(config_path)
+        channels = data.setdefault("channels", {})
+        existing = channels.get("weixin", {})
+        if not isinstance(existing, dict):
+            existing = {}
+        values = {
+            "enabled": True,
+            "stateDir": str(channel.config.state_dir or ""),
+            "accountId": account_id,
+        }
+        channels["weixin"] = upsert_weixin_instance(
+            existing,
+            WeixinChannel.default_config(),
+            instance_id,
+            values,
+        )
+        write_config_data(config_path, data)
 
     @staticmethod
     async def _close_channel(channel: Any) -> None:
@@ -416,6 +474,7 @@ class WeixinConnectStore:
     def _start_payload(session: WeixinConnectSession) -> dict[str, Any]:
         return {
             "session_id": session.id,
+            "instance_id": session.instance_id,
             "status": "pending",
             "qr_url": session.qr_url,
             "interval_ms": 2000,
@@ -427,6 +486,7 @@ class WeixinConnectStore:
     def _pending_payload(session: WeixinConnectSession) -> dict[str, Any]:
         return {
             "session_id": session.id,
+            "instance_id": session.instance_id,
             "status": "pending",
             "qr_url": session.qr_url,
             "interval_ms": 2000,

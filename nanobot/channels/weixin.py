@@ -34,6 +34,8 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.paths import get_media_dir, get_runtime_subdir
 from nanobot.config.schema import Base
+from nanobot.identity.credentials import get_kangaroo_credential_store
+from nanobot.identity.principal import IDENTITY_METADATA_KEY
 from nanobot.utils.helpers import split_message
 
 # ---------------------------------------------------------------------------
@@ -488,10 +490,12 @@ class WeixinChannel(BaseChannel):
         if self.config.token:
             self._token = self.config.token
         elif not self._load_state():
-            if not await self._qr_login():
-                self.logger.error("login failed. Run 'nanobot channels login weixin' to authenticate.")
-                self._running = False
-                return
+            self.logger.error(
+                "WeChat account is not connected. Reconnect it from Settings or run "
+                "'nanobot channels login weixin'."
+            )
+            self._running = False
+            return
 
         self.logger.info("channel starting with long-poll...")
 
@@ -524,7 +528,6 @@ class WeixinChannel(BaseChannel):
         if self._client:
             await self._client.aclose()
             self._client = None
-        self._save_state()
     # ------------------------------------------------------------------
     # Polling  (matches monitor.ts monitorWeixinProvider)
     # ------------------------------------------------------------------
@@ -572,12 +575,27 @@ class WeixinChannel(BaseChannel):
 
         if is_error:
             if errcode == ERRCODE_SESSION_EXPIRED or ret == ERRCODE_SESSION_EXPIRED:
-                self._pause_session()
-                remaining = self._session_pause_remaining_s()
-                self.logger.warning(
-                    "session expired (errcode {}). Pausing {} min.",
+                if self._get_updates_buf:
+                    self._get_updates_buf = ""
+                    self._context_tokens.clear()
+                    self._context_token_at.clear()
+                    self._typing_tickets.clear()
+                    self._save_state()
+                    self.logger.warning(
+                        "session cursor rejected (errcode {}); reset cursor and retrying",
+                        errcode,
+                    )
+                    return
+
+                self._token = ""
+                self._context_tokens.clear()
+                self._context_token_at.clear()
+                self._typing_tickets.clear()
+                self._save_state()
+                self._running = False
+                self.logger.error(
+                    "WeChat login expired (errcode {}); reconnect this account from Settings",
                     errcode,
-                    max((remaining + 59) // 60, 1),
                 )
                 return
             raise RuntimeError(
@@ -621,6 +639,11 @@ class WeixinChannel(BaseChannel):
         if not from_user_id:
             return
 
+        metadata: dict[str, Any] = {"message_id": msg_id}
+        instance_identity = get_kangaroo_credential_store().instance_identity_metadata()
+        if instance_identity is not None:
+            metadata[IDENTITY_METADATA_KEY] = instance_identity
+
         # Deduplication by message_id
         if msg_id in self._processed_ids:
             return
@@ -635,7 +658,7 @@ class WeixinChannel(BaseChannel):
                     sender_id=from_user_id,
                     chat_id=from_user_id,
                     content="",
-                    metadata={"message_id": msg_id},
+                    metadata=metadata,
                     is_dm=False,
                 )
                 return
@@ -658,7 +681,7 @@ class WeixinChannel(BaseChannel):
                     sender_id=from_user_id,
                     chat_id=from_user_id,
                     content="",
-                    metadata={"message_id": msg_id},
+                    metadata=metadata,
                     is_dm=True,
                 )
             finally:
@@ -839,7 +862,7 @@ class WeixinChannel(BaseChannel):
             chat_id=from_user_id,
             content=content,
             media=media_paths or None,
-            metadata={"message_id": msg_id},
+            metadata=metadata,
         )
 
     # ------------------------------------------------------------------

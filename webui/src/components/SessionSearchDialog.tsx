@@ -166,7 +166,9 @@ export function SessionSearchDialog({
                 {sessionResults.map((session, index) => {
                   const title = titleOverrides[session.key]?.trim() ||
                     session.title?.trim() ||
-                    deriveTitle(session.preview, t("chat.newChat"));
+                    (session.channelType === "weixin"
+                      ? t("chat.weixinConversation", { id: session.participantLabel || "" })
+                      : deriveTitle(session.preview, t("chat.newChat")));
                   const preview = session.preview.trim();
                   const showPreview =
                     preview.length > 0 &&
@@ -229,6 +231,8 @@ function sessionMatchesTerms(
     titleOverride,
     session.title,
     session.preview,
+    session.participantLabel,
+    session.channelType,
   ]
     .filter(Boolean)
     .join(" ")

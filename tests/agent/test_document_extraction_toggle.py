@@ -99,6 +99,35 @@ async def test_state_restore_references_documents_when_extraction_disabled(
 
 
 @pytest.mark.asyncio
+async def test_state_restore_persists_verified_channel_identity(tmp_path: Path) -> None:
+    from nanobot.identity.principal import IDENTITY_METADATA_KEY, Principal
+    from nanobot.identity.runtime import TenantRuntimeStore
+
+    loop = _make_loop(tmp_path / "system")
+    identity = TenantRuntimeStore(tmp_path / "tenants").for_principal(
+        Principal(user_id="institution-account", org_id="institution-1")
+    ).identity_metadata()
+    ctx = TurnContext(
+        msg=InboundMessage(
+            channel="weixin",
+            sender_id="wx-employee-a",
+            chat_id="wx-employee-a",
+            content="hello",
+            metadata={IDENTITY_METADATA_KEY: identity},
+        ),
+        session_key="weixin:wx-employee-a",
+        state=TurnState.RESTORE,
+        turn_id="turn-identity",
+        runtime=loop.llm_runtime(),
+    )
+
+    assert await loop._state_restore(ctx) == "ok"
+
+    session = loop.sessions.get_or_create(ctx.session_key)
+    assert session.metadata[IDENTITY_METADATA_KEY] == identity
+
+
+@pytest.mark.asyncio
 async def test_pending_followup_references_documents_when_extraction_disabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

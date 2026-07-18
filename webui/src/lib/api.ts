@@ -134,6 +134,10 @@ export async function listSessions(
     preview?: string;
     run_started_at?: number | null;
     workspace_scope?: WorkspaceScopePayload | null;
+    read_only?: boolean;
+    channel_type?: string;
+    channel_instance?: string;
+    participant_label?: string;
   };
   const body = await request<{ sessions: Row[] }>(
     `${base}/api/sessions`,
@@ -150,6 +154,10 @@ export async function listSessions(
     preview: s.preview ?? "",
     runStartedAt: s.run_started_at ?? null,
     workspaceScope: s.workspace_scope ?? null,
+    readOnly: s.read_only === true,
+    channelType: s.channel_type,
+    channelInstance: s.channel_instance,
+    participantLabel: s.participant_label,
   }));
 }
 

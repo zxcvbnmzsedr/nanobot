@@ -25,6 +25,7 @@ from nanobot.bus.outbound_events import (
 )
 from nanobot.bus.queue import MessageBus
 from nanobot.channels._feishu_instances import ChannelInstanceSpec, feishu_instance_specs
+from nanobot.channels._weixin_instances import weixin_instance_specs
 from nanobot.channels.base import BaseChannel
 from nanobot.channels.registry import DEFAULT_ENABLED_CHANNELS
 from nanobot.config.schema import Config
@@ -66,6 +67,10 @@ def _channel_config_enabled(name: str, section: Any) -> bool:
         from nanobot.channels.feishu import FeishuChannel
 
         return bool(feishu_instance_specs(section, FeishuChannel.default_config(), enabled_only=True))
+    if name == "weixin":
+        from nanobot.channels.weixin import WeixinChannel
+
+        return bool(weixin_instance_specs(section, WeixinChannel.default_config(), enabled_only=True))
     default_enabled = name in DEFAULT_ENABLED_CHANNELS
     if isinstance(section, dict):
         return bool(section.get("enabled", default_enabled))
@@ -149,6 +154,12 @@ class ChannelManager:
     ) -> list[ChannelInstanceSpec]:
         if name == "feishu":
             return feishu_instance_specs(
+                section,
+                cls.default_config(),
+                enabled_only=enabled_only,
+            )
+        if name == "weixin":
+            return weixin_instance_specs(
                 section,
                 cls.default_config(),
                 enabled_only=enabled_only,
@@ -370,11 +381,11 @@ class ChannelManager:
         section = self._channel_section(name)
         if action == "disable":
             runtime_names = [name if not instance_id else f"{name}.{instance_id}"]
-            if name == "feishu" and not instance_id:
+            if name in {"feishu", "weixin"} and not instance_id:
                 runtime_names = [
                     runtime_name
                     for runtime_name in self.channels
-                    if runtime_name == "feishu" or runtime_name.startswith("feishu.")
+                    if runtime_name == name or runtime_name.startswith(f"{name}.")
                 ]
             stopped = False
             for runtime_name in runtime_names:

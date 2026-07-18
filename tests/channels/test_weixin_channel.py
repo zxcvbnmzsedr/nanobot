@@ -22,6 +22,7 @@ from nanobot.channels.weixin import (
     _decrypt_aes_ecb,
     _encrypt_aes_ecb,
 )
+from nanobot.identity.principal import IDENTITY_METADATA_KEY, Principal
 
 
 def _make_channel() -> tuple[WeixinChannel, MessageBus]:
@@ -102,6 +103,53 @@ async def test_process_message_deduplicates_inbound_ids() -> None:
     assert first.chat_id == "wx-user"
     assert first.content == "hello"
     assert bus.inbound_size == 0
+
+
+@pytest.mark.asyncio
+async def test_named_account_routes_replies_through_its_own_runtime() -> None:
+    channel, bus = _make_channel()
+    channel.name = "weixin.account-2"
+
+    await channel._process_message({
+        "message_type": 1,
+        "message_id": "m-account-2",
+        "from_user_id": "wx-user",
+        "context_token": "ctx-account-2",
+        "item_list": [{"type": ITEM_TEXT, "text_item": {"text": "hello"}}],
+    })
+
+    inbound = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+    assert inbound.channel == "weixin.account-2"
+    assert inbound.session_key == "weixin.account-2:wx-user"
+
+
+@pytest.mark.asyncio
+async def test_process_messages_share_instance_identity_but_keep_employee_sessions(
+    monkeypatch,
+) -> None:
+    channel, bus = _make_channel()
+    principal = Principal(user_id="institution-account", org_id="institution-1")
+    store = SimpleNamespace(instance_identity_metadata=principal.metadata)
+    monkeypatch.setattr(weixin_mod, "get_kangaroo_credential_store", lambda: store)
+
+    for employee, message_id in (("wx-employee-a", "m-a"), ("wx-employee-b", "m-b")):
+        await channel._process_message({
+            "message_type": 1,
+            "message_id": message_id,
+            "from_user_id": employee,
+            "context_token": f"ctx-{employee}",
+            "item_list": [{"type": ITEM_TEXT, "text_item": {"text": "hello"}}],
+        })
+
+    first = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+    second = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+
+    assert (first.session_key, second.session_key) == (
+        "weixin:wx-employee-a",
+        "weixin:wx-employee-b",
+    )
+    assert first.metadata[IDENTITY_METADATA_KEY] == principal.metadata()
+    assert second.metadata[IDENTITY_METADATA_KEY] == principal.metadata()
 
 
 @pytest.mark.asyncio
@@ -434,15 +482,57 @@ async def test_send_still_sends_text_when_typing_ticket_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_poll_once_pauses_session_on_expired_errcode() -> None:
-    channel, _bus = _make_channel()
+async def test_poll_once_clears_invalid_login_without_silent_hour_pause(tmp_path) -> None:
+    channel = WeixinChannel(
+        WeixinConfig(enabled=True, allow_from=["*"], state_dir=str(tmp_path)),
+        MessageBus(),
+    )
     channel._client = SimpleNamespace(timeout=None)
     channel._token = "token"
     channel._api_post = AsyncMock(return_value={"ret": 0, "errcode": -14, "errmsg": "expired"})
 
     await channel._poll_once()
 
-    assert channel._session_pause_remaining_s() > 0
+    assert channel._token == ""
+    assert channel._running is False
+    assert channel._session_pause_remaining_s() == 0
+
+
+@pytest.mark.asyncio
+async def test_poll_once_resets_stale_cursor_before_invalidating_login(tmp_path) -> None:
+    channel = WeixinChannel(
+        WeixinConfig(enabled=True, allow_from=["*"], state_dir=str(tmp_path)),
+        MessageBus(),
+    )
+    channel._client = SimpleNamespace(timeout=None)
+    channel._token = "token"
+    channel._get_updates_buf = "stale-cursor"
+    channel._context_tokens = {"wx-user": "stale-context"}
+    channel._api_post = AsyncMock(return_value={"ret": 0, "errcode": -14, "errmsg": "expired"})
+
+    await channel._poll_once()
+
+    assert channel._token == "token"
+    assert channel._get_updates_buf == ""
+    assert channel._context_tokens == {}
+
+
+@pytest.mark.asyncio
+async def test_stopping_old_runtime_does_not_overwrite_fresh_qr_login(tmp_path) -> None:
+    channel = WeixinChannel(
+        WeixinConfig(enabled=True, allow_from=["*"], state_dir=str(tmp_path)),
+        MessageBus(),
+    )
+    channel._token = "old-token"
+    (tmp_path / "account.json").write_text(
+        json.dumps({"token": "fresh-token"}),
+        encoding="utf-8",
+    )
+
+    await channel.stop()
+
+    saved = json.loads((tmp_path / "account.json").read_text(encoding="utf-8"))
+    assert saved["token"] == "fresh-token"
 
 
 @pytest.mark.asyncio
@@ -1386,6 +1476,20 @@ async def test_poll_loop_logs_exception_and_continues_on_poll_failure(monkeypatc
 
     assert call_count == 2
     assert any("WeChat poll loop error" in m for m in logged_messages)
+
+
+@pytest.mark.asyncio
+async def test_start_without_saved_account_does_not_open_background_qr_flow(tmp_path) -> None:
+    channel = WeixinChannel(
+        WeixinConfig(enabled=True, allow_from=["*"], state_dir=str(tmp_path)),
+        MessageBus(),
+    )
+    channel._qr_login = AsyncMock(return_value=True)
+
+    await channel.start()
+
+    assert channel.is_running is False
+    channel._qr_login.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

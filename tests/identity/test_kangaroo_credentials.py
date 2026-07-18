@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.identity.credentials import KangarooCredentialStore
+from nanobot.identity.credentials import KangarooCredentialStore, KangarooInstanceBindingError
 from nanobot.identity.kangaroo import (
     AuthenticatedKangarooIdentity,
     KangarooIdentityError,
@@ -71,6 +71,45 @@ def test_credentials_survive_restart_without_plaintext_on_disk(tmp_path: Path) -
 
     restored = KangarooCredentialStore(persistence_path=vault_path)
     assert restored.get(principal.user_scope) == "secret-access"
+
+
+def test_instance_binding_survives_restart_and_clears_with_credentials(tmp_path: Path) -> None:
+    principal = _principal("institution-account")
+    vault_path = tmp_path / "auth" / "credentials.enc"
+    first = KangarooCredentialStore(persistence_path=vault_path)
+    first.put(
+        principal,
+        "institution-access",
+        refresh_token="institution-refresh",
+        expires_at=9_999_999_999,
+    )
+    first.bind_instance(principal)
+
+    restored = KangarooCredentialStore(persistence_path=vault_path)
+
+    assert restored.instance_principal() == principal
+    metadata = restored.instance_identity_metadata()
+    assert metadata is not None
+    assert metadata["user_scope"] == principal.user_scope
+    assert metadata["org_scope"] == principal.org_scope
+    assert metadata["user_memory_path"].endswith("/workspace/memory/MEMORY.md")
+    assert metadata["org_memory_path"].endswith("/memory/MEMORY.md")
+    assert b"institution-account" not in vault_path.read_bytes()
+    assert restored.remove(principal.user_scope) is True
+    assert restored.instance_principal() is None
+
+
+def test_instance_binding_cannot_be_replaced_by_another_account() -> None:
+    store = KangarooCredentialStore()
+    first = _principal("institution-one")
+    second = _principal("institution-two")
+    store.put_instance(first, "first-access")
+
+    with pytest.raises(KangarooInstanceBindingError, match="already bound"):
+        store.put_instance(second, "second-access")
+
+    assert store.instance_principal() == first
+    assert store.get(second.user_scope) is None
 
 
 @pytest.mark.asyncio

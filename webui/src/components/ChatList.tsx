@@ -9,6 +9,7 @@ import {
   ArchiveRestore,
   Folder,
   MoreHorizontal,
+  MessageCircle,
   Pencil,
   Pin,
   PinOff,
@@ -226,15 +227,21 @@ export const ChatList = memo(function ChatList({
                 <ul className="space-y-0.5">
                   {visibleSessions.map((s) => {
                     const active = s.key === activeKey;
+                    const isWeixin = s.channelType === "weixin";
+                    const channelFallbackTitle = isWeixin
+                      ? t("chat.weixinConversation", { id: s.participantLabel || "" })
+                      : t("chat.newChat");
                     const fallbackTitle = t("chat.fallbackTitle", {
                       id: s.chatId.slice(0, 6),
                     });
                     const generatedTitle = s.title?.trim() || "";
-                    const title = displayTitle(s, titleOverrides, t("chat.newChat"));
+                    const title = isWeixin
+                      ? titleOverrides[s.key]?.trim() || s.title?.trim() || channelFallbackTitle
+                      : displayTitle(s, titleOverrides, channelFallbackTitle);
                     const tooltipTitle =
                       titleOverrides[s.key]?.trim() ||
                       generatedTitle ||
-                      deriveTitle(s.preview, fallbackTitle);
+                      (isWeixin ? title : deriveTitle(s.preview, fallbackTitle));
                     const isPinned = pinned.has(s.key);
                     const isArchived = archived.has(s.key);
                     const preview = s.preview.trim();
@@ -281,8 +288,14 @@ export const ChatList = memo(function ChatList({
                                 ) : null}
                               </span>
                             ) : (
-                              <span className="block w-full truncate font-medium leading-5">
-                                {title}
+                              <span className="flex w-full min-w-0 items-center gap-1.5 font-medium leading-5">
+                                {isWeixin ? (
+                                  <MessageCircle
+                                    className="h-3.5 w-3.5 shrink-0 text-[#07c160]"
+                                    aria-label={t("chat.weixinChannel")}
+                                  />
+                                ) : null}
+                                <span className="min-w-0 flex-1 truncate">{title}</span>
                               </span>
                             )}
                             {showPreview ? (
@@ -344,18 +357,20 @@ export const ChatList = memo(function ChatList({
                                 )}
                                 {isArchived ? t("chat.unarchive") : t("chat.archive")}
                               </DropdownMenuItem>
-                              <DropdownMenuItem
-                                onSelect={() => {
-                                  window.setTimeout(() => onRequestDelete(s.key, title), 0);
-                                }}
-                                className={cn(
-                                  ACTION_MENU_ITEM_CLASS,
-                                  "text-destructive focus:text-destructive",
-                                )}
-                              >
-                                <Trash2 className="h-4 w-4 shrink-0" />
-                                {t("chat.delete")}
-                              </DropdownMenuItem>
+                              {!s.readOnly ? (
+                                <DropdownMenuItem
+                                  onSelect={() => {
+                                    window.setTimeout(() => onRequestDelete(s.key, title), 0);
+                                  }}
+                                  className={cn(
+                                    ACTION_MENU_ITEM_CLASS,
+                                    "text-destructive focus:text-destructive",
+                                  )}
+                                >
+                                  <Trash2 className="h-4 w-4 shrink-0" />
+                                  {t("chat.delete")}
+                                </DropdownMenuItem>
+                              ) : null}
                             </DropdownMenuContent>
                           </DropdownMenu>
                         </div>

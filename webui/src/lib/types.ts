@@ -248,6 +248,11 @@ export interface ChatSummary {
   /** Unix epoch seconds when this session currently has a turn in flight. */
   runStartedAt?: number | null;
   workspaceScope?: WorkspaceScopePayload | null;
+  /** External channel sessions are visible in WebUI but cannot be continued here. */
+  readOnly?: boolean;
+  channelType?: "weixin" | string;
+  channelInstance?: string;
+  participantLabel?: string;
 }
 
 export type WorkspaceAccessMode = "restricted" | "full";
@@ -728,6 +733,7 @@ export interface NanobotChannelInstanceInfo {
   enabled: boolean;
   configured: boolean;
   app_id?: string;
+  account_id?: string;
   group_policy?: string;
   allow_from?: string[];
 }

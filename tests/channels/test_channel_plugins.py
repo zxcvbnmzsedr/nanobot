@@ -207,6 +207,44 @@ def test_channel_manager_expands_feishu_instances(monkeypatch: pytest.MonkeyPatc
     assert manager.channels["feishu.product"].name == "feishu.product"
 
 
+def test_manager_builds_enabled_weixin_account_instances(monkeypatch):
+    from nanobot.channels.manager import ChannelManager
+
+    class _FakeWeixin(_FakePlugin):
+        name = "weixin"
+        display_name = "WeChat"
+
+        @classmethod
+        def default_config(cls):
+            return {"enabled": False, "allowFrom": [], "stateDir": ""}
+
+    monkeypatch.setattr("nanobot.channels.registry.discover_channel_names", lambda: ["weixin"])
+    monkeypatch.setattr(
+        "nanobot.channels.registry.discover_enabled",
+        lambda enabled, _names=None, warn_import_errors=True: {"weixin": _FakeWeixin}
+        if "weixin" in enabled
+        else {},
+    )
+
+    cfg = Config.model_validate({
+        "channels": {
+            "weixin": {
+                "instances": [
+                    {"id": "default", "enabled": True, "stateDir": "/tmp/weixin-default"},
+                    {"id": "sales", "enabled": True, "stateDir": "/tmp/weixin-sales"},
+                    {"id": "off", "enabled": False, "stateDir": "/tmp/weixin-off"},
+                ],
+            },
+        },
+    })
+
+    manager = ChannelManager(cfg, MessageBus())
+
+    assert set(manager.channels) == {"weixin", "weixin.sales"}
+    assert manager.channels["weixin"].config["stateDir"] == "/tmp/weixin-default"
+    assert manager.channels["weixin.sales"].config["stateDir"] == "/tmp/weixin-sales"
+
+
 # ---------------------------------------------------------------------------
 # discover_plugins
 # ---------------------------------------------------------------------------
@@ -1188,6 +1226,13 @@ def test_optional_features_payload_detects_saved_weixin_login_state(tmp_path, mo
     weixin = payload["features"][0]
     assert weixin["enabled"] is True
     assert weixin["configured"] is True
+    assert weixin["instances"] == [{
+        "id": "default",
+        "name": "WeChat account",
+        "enabled": True,
+        "configured": True,
+        "account_id": "",
+    }]
 
 
 def test_optional_features_payload_detects_legacy_default_weixin_state(tmp_path, monkeypatch):

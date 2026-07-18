@@ -22,7 +22,7 @@ from nanobot.channels.websocket import WebSocketChannel, WebSocketConfig
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronJob, CronPayload, CronSchedule
 from nanobot.identity.kangaroo import AuthenticatedKangarooIdentity
-from nanobot.identity.principal import Principal
+from nanobot.identity.principal import IDENTITY_METADATA_KEY, Principal
 from nanobot.optional_features import InstallResult
 from nanobot.runtime_context import (
     RUNTIME_CONTEXT_HISTORY_META,
@@ -1801,6 +1801,71 @@ async def test_sessions_list_only_returns_websocket_sessions_by_default(
     finally:
         await channel.stop()
         await server_task
+
+
+def test_bound_institution_can_read_its_weixin_sessions(
+    bus: MagicMock,
+    tmp_path: Path,
+) -> None:
+    principal = Principal(user_id="101", org_id="9001", name="Institution")
+    other = Principal(user_id="102", org_id="9001", name="Employee")
+    session_key = "weixin.account-sales:wx-contact@im.wechat"
+    sessions = SessionManager(tmp_path / "workspace")
+    session = Session(key=session_key)
+    session.metadata[IDENTITY_METADATA_KEY] = principal.metadata()
+    session.add_message("user", "你好")
+    session.add_message("assistant", "你好，有什么可以帮你？")
+    sessions.save(session)
+    channel = _ch(
+        bus,
+        session_manager=sessions,
+        port=29906,
+        websocketRequiresToken=True,
+        kangarooAuth={
+            "enabled": True,
+            "apiBase": "https://accounts.example.com/",
+            "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+            "memoryApiUrl": "https://agent.example.com/nanobot/memory",
+            "runtimeRoot": str(tmp_path / "tenants"),
+        },
+    )
+    credentials = channel.gateway.http.credential_store
+    credentials.clear()
+    credentials.put_instance(principal, "institution-token")
+    try:
+        rows = channel.gateway.http._sessions_list_payload(principal)["sessions"]
+        assert len(rows) == 1
+        assert rows[0] == {
+            **rows[0],
+            "key": session_key,
+            "title": "",
+            "preview": "你好",
+            "read_only": True,
+            "channel_type": "weixin",
+            "channel_instance": "account-sales",
+            "participant_label": "ontact",
+            "workspace_scope": None,
+        }
+        assert channel.gateway.http._sessions_list_payload(other)["sessions"] == []
+
+        token = channel.gateway.tokens.issue_api_token(300, principal)
+        request = _FakeReq(
+            {"Authorization": f"Bearer {token}"},
+            path=f"/api/sessions/{quote(session_key, safe='')}/webui-thread",
+        )
+        response = channel.gateway.http._handle_webui_thread_get(
+            request,
+            quote(session_key, safe=""),
+        )
+        assert response.status_code == 200
+        body = json.loads(response.body)
+        assert body["read_only"] is True
+        assert [(row["role"], row["content"]) for row in body["messages"]] == [
+            ("user", "你好"),
+            ("assistant", "你好，有什么可以帮你？"),
+        ]
+    finally:
+        credentials.clear()
 
 
 @pytest.mark.asyncio

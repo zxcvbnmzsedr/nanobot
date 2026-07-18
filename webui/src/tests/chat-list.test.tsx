@@ -18,6 +18,34 @@ function session(overrides: Partial<ChatSummary>): ChatSummary {
 }
 
 describe("ChatList", () => {
+  it("labels WeChat sessions and hides destructive deletion", () => {
+    const onRequestDelete = vi.fn();
+    render(
+      <ChatList
+        sessions={[session({
+          key: "weixin.account-sales:contact@im.wechat",
+          channel: "weixin.account-sales",
+          chatId: "contact@im.wechat",
+          readOnly: true,
+          channelType: "weixin",
+          participantLabel: "ontact",
+        })]}
+        activeKey={null}
+        onSelect={vi.fn()}
+        onRequestDelete={onRequestDelete}
+        onTogglePin={vi.fn()}
+        onRequestRename={vi.fn()}
+        onToggleArchive={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("WeChat conversation · ontact")).toBeInTheDocument();
+    expect(screen.getByLabelText("WeChat")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Chat actions for WeChat conversation · ontact"));
+    expect(screen.queryByText("Delete")).not.toBeInTheDocument();
+    expect(onRequestDelete).not.toHaveBeenCalled();
+  });
+
   it("orders chats by latest session activity by default", () => {
     const sessions = [
       session({

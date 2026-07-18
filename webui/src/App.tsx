@@ -1943,7 +1943,9 @@ function Shell({
   const headerTitle = activeSession
     ? sidebarState.title_overrides[activeSession.key] ||
       activeSession.title ||
-      deriveTitle(activeSession.preview, t("chat.newChat"))
+      (activeSession.channelType === "weixin"
+        ? t("chat.weixinConversation", { id: activeSession.participantLabel || "" })
+        : deriveTitle(activeSession.preview, t("chat.newChat")))
     : t("app.brand");
 
   useEffect(() => {

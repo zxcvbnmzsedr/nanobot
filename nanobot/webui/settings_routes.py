@@ -623,8 +623,8 @@ class WebUISettingsRouter:
         try:
             instance_id = (_query_first(query, "instance_id") or "").strip()
             runtime_name = name
-            if name == "feishu" and instance_id and instance_id != "default":
-                runtime_name = f"feishu.{instance_id}"
+            if name in {"feishu", "weixin"} and instance_id and instance_id != "default":
+                runtime_name = f"{name}.{instance_id}"
             result = self._channel_feature_action(action, runtime_name)
             if inspect.isawaitable(result):
                 result = await result
@@ -700,7 +700,7 @@ class WebUISettingsRouter:
             return self._json_response(payload)
 
         feature_query = {"name": [name]}
-        if name == "feishu":
+        if name in {"feishu", "weixin"}:
             feature_query["instance_id"] = [instance_id]
 
         try:
@@ -973,8 +973,15 @@ class WebUISettingsRouter:
             "true",
             "yes",
         }
+        query = self._query(request)
+        instance_id = (_query_first(query, "instance_id") or "default").strip()
+        mode = (_query_first(query, "mode") or "replace").strip()
         try:
-            payload = await self._weixin_connect.start(force=force)
+            payload = await self._weixin_connect.start(
+                force=force,
+                instance_id=instance_id,
+                mode=mode,
+            )
         except ChannelConnectError as e:
             return self._error_response(e.status, e.message)
         except Exception:
@@ -987,6 +994,7 @@ class WebUISettingsRouter:
                 request,
                 "weixin",
                 payload,
+                instance_id=str(payload.get("instance_id") or "default"),
             )
         return self._json_response(payload)
 
@@ -1011,6 +1019,7 @@ class WebUISettingsRouter:
                 request,
                 "weixin",
                 payload,
+                instance_id=str(payload.get("instance_id") or "default"),
             )
         return self._json_response(payload)
 
@@ -1028,12 +1037,17 @@ class WebUISettingsRouter:
         request: WsRequest,
         channel_name: str,
         payload: dict[str, Any],
+        *,
+        instance_id: str = "default",
     ) -> dict[str, Any]:
+        feature_query = {"name": [channel_name]}
+        if channel_name in {"feishu", "weixin"}:
+            feature_query["instance_id"] = [instance_id]
         try:
             features = await asyncio.to_thread(
                 nanobot_features_action,
                 "enable",
-                {"name": [channel_name]},
+                feature_query,
                 allow_install=self._allow_feature_package_install(connection, request),
             )
         except OptionalFeatureError as exc:
@@ -1047,7 +1061,7 @@ class WebUISettingsRouter:
         else:
             features = await self._apply_nanobot_feature_runtime_change(
                 "enable",
-                {"name": [channel_name]},
+                feature_query,
                 features,
             )
         payload = dict(payload)

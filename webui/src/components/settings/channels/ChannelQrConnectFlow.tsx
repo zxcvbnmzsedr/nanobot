@@ -297,11 +297,17 @@ export function FeishuConnectFlow({
 
 export function WeixinConnectFlow({
   token,
+  instanceId = "default",
+  mode = "replace",
+  force = false,
   idleLabel,
   connectRequestId,
   onFeaturesUpdate,
 }: {
   token: string;
+  instanceId?: string;
+  mode?: "replace" | "create";
+  force?: boolean;
   idleLabel?: string;
   connectRequestId?: number;
   onFeaturesUpdate: (payload: NanobotFeaturesPayload) => void;
@@ -312,6 +318,7 @@ export function WeixinConnectFlow({
     <ChannelQrConnectFlow
       token={token}
       channelName="weixin"
+      startOptions={{ instanceId, mode, force }}
       idleLabel={idleLabel}
       connectRequestId={connectRequestId}
       onFeaturesUpdate={onFeaturesUpdate}

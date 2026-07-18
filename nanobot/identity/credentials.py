@@ -39,6 +39,10 @@ class _Credential:
 RefreshCallback = Callable[[str], Awaitable[KangarooTokenBundle]]
 
 
+class KangarooInstanceBindingError(RuntimeError):
+    """Raised when another account tries to replace the instance owner."""
+
+
 class KangarooCredentialStore:
     """Per-user OAuth credentials with refresh, rotation, and restart recovery."""
 
@@ -65,6 +69,7 @@ class KangarooCredentialStore:
         self._persistence_path = persistence_path
         self._refresher = refresher
         self._entries: OrderedDict[str, _Credential] = OrderedDict()
+        self._instance_principal: Principal | None = None
         self._refresh_locks: dict[str, asyncio.Lock] = {}
         self._lock = threading.RLock()
         if persistence_path is not None:
@@ -93,6 +98,7 @@ class KangarooCredentialStore:
             self._refresh_skew_s = refresh_skew_s
             if path_changed:
                 self._entries.clear()
+                self._instance_principal = None
                 self._refresh_locks.clear()
                 self._fernet()
                 self._load_locked()
@@ -122,7 +128,8 @@ class KangarooCredentialStore:
             self._entries.pop(principal.user_scope, None)
             self._entries[principal.user_scope] = credential
             while len(self._entries) > self._max_entries:
-                self._entries.popitem(last=False)
+                evicted_scope, _ = self._entries.popitem(last=False)
+                self._clear_instance_binding_locked(evicted_scope)
             self._save_locked()
 
     def put_identity(self, identity: AuthenticatedKangarooIdentity) -> None:
@@ -133,6 +140,54 @@ class KangarooCredentialStore:
             expires_at=identity.expires_at,
             refresh_expires_at=identity.refresh_expires_at,
         )
+
+    def put_instance_identity(self, identity: AuthenticatedKangarooIdentity) -> None:
+        """Store credentials and bind the verified account to this instance."""
+        with self._lock:
+            self._ensure_instance_binding_allowed_locked(identity.principal)
+            self.put_identity(identity)
+            self._instance_principal = identity.principal
+            self._save_locked()
+
+    def put_instance(self, principal: Principal, access_token: str) -> None:
+        """Store an exchanged token and bind its account to this instance."""
+        with self._lock:
+            self._ensure_instance_binding_allowed_locked(principal)
+            self.put(principal, access_token)
+            self._instance_principal = principal
+            self._save_locked()
+
+    def bind_instance(self, principal: Principal) -> None:
+        """Use a verified account as the identity for instance-owned channels."""
+        with self._lock:
+            if principal.user_scope not in self._entries:
+                raise ValueError("instance identity requires stored Kangaroo credentials")
+            self._ensure_instance_binding_allowed_locked(principal)
+            self._instance_principal = principal
+            self._save_locked()
+
+    def instance_principal(self) -> Principal | None:
+        """Return the verified account bound to this nanobot instance."""
+        with self._lock:
+            principal = self._instance_principal
+            if principal is None or principal.user_scope not in self._entries:
+                return None
+            return principal
+
+    def instance_identity_metadata(self) -> dict[str, Any] | None:
+        """Return instance identity plus durable memory paths when configured."""
+        with self._lock:
+            principal = self._instance_principal
+            persistence_path = self._persistence_path
+            if principal is None or principal.user_scope not in self._entries:
+                return None
+        if persistence_path is None:
+            return principal.metadata()
+
+        from nanobot.identity.runtime import TenantRuntimeStore
+
+        runtime = TenantRuntimeStore(persistence_path.parent).for_principal(principal)
+        return runtime.identity_metadata()
 
     def get(self, user_scope: str) -> str | None:
         """Return the cached access token without performing network I/O."""
@@ -145,6 +200,7 @@ class KangarooCredentialStore:
                 credential, now
             ):
                 self._entries.pop(user_scope, None)
+                self._clear_instance_binding_locked(user_scope)
                 self._save_locked()
                 return None
             self._entries.move_to_end(user_scope)
@@ -186,10 +242,14 @@ class KangarooCredentialStore:
         with self._lock:
             credential = self._entries.get(user_scope)
             if credential is None:
-                return False
+                binding_removed = self._clear_instance_binding_locked(user_scope)
+                if binding_removed:
+                    self._save_locked()
+                return binding_removed
             if access_token is not None and credential.access_token != access_token:
                 return False
             self._entries.pop(user_scope, None)
+            self._clear_instance_binding_locked(user_scope)
             self._refresh_locks.pop(user_scope, None)
             self._save_locked()
             return True
@@ -197,6 +257,7 @@ class KangarooCredentialStore:
     def clear(self) -> None:
         with self._lock:
             self._entries.clear()
+            self._instance_principal = None
             self._refresh_locks.clear()
             self._save_locked()
 
@@ -295,6 +356,26 @@ class KangarooCredentialStore:
         ]
         for user_scope in expired:
             self._entries.pop(user_scope, None)
+            self._clear_instance_binding_locked(user_scope)
+
+    def _clear_instance_binding_locked(self, user_scope: str) -> bool:
+        principal = self._instance_principal
+        if principal is None or principal.user_scope != user_scope:
+            return False
+        self._instance_principal = None
+        return True
+
+    def _ensure_instance_binding_allowed_locked(self, principal: Principal) -> None:
+        current = self._instance_principal
+        if current is None:
+            return
+        if (
+            current.user_scope != principal.user_scope
+            or current.org_scope != principal.org_scope
+        ):
+            raise KangarooInstanceBindingError(
+                "nanobot instance is already bound to another Kangaroo account"
+            )
 
     def _load(self) -> None:
         with self._lock:
@@ -322,6 +403,9 @@ class KangarooCredentialStore:
                 ):
                     continue
                 self._entries[user_scope] = credential
+            principal = self._principal_from_json(payload.get("instancePrincipal"))
+            if principal is not None and principal.user_scope in self._entries:
+                self._instance_principal = principal
         except (OSError, ValueError, InvalidToken, json.JSONDecodeError) as exc:
             logger.warning("Ignoring unreadable Kangaroo credential vault: {}", exc)
 
@@ -340,6 +424,11 @@ class KangarooCredentialStore:
                 }
                 for user_scope, credential in self._entries.items()
             },
+            "instancePrincipal": (
+                self._instance_principal.public_payload()
+                if self._instance_principal is not None
+                else None
+            ),
         }
         encrypted = self._fernet().encrypt(
             json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
@@ -384,6 +473,22 @@ class KangarooCredentialStore:
                 raw.get("refreshExpiresAt")
             ),
         )
+
+    @staticmethod
+    def _principal_from_json(raw: Any) -> Principal | None:
+        if not isinstance(raw, dict):
+            return None
+        try:
+            return Principal.from_kangaroo_payload({
+                "id": raw.get("userId"),
+                "orgId": raw.get("orgId"),
+                "name": raw.get("name"),
+                "orgName": raw.get("orgName"),
+                "orgType": raw.get("orgType"),
+                "accType": raw.get("accType"),
+            })
+        except ValueError:
+            return None
 
     @staticmethod
     def _optional_timestamp(value: Any) -> float | None:

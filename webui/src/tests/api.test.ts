@@ -786,6 +786,33 @@ describe("webui API helpers", () => {
     ]);
   });
 
+  it("maps read-only WeChat session metadata", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        sessions: [{
+          key: "weixin.account-sales:contact@im.wechat",
+          created_at: "2026-07-18T10:00:00",
+          updated_at: "2026-07-18T10:01:00",
+          preview: "你好",
+          read_only: true,
+          channel_type: "weixin",
+          channel_instance: "account-sales",
+          participant_label: "ontact",
+        }],
+      }),
+    } as Response);
+
+    await expect(listSessions("tok")).resolves.toMatchObject([{
+      channel: "weixin.account-sales",
+      chatId: "contact@im.wechat",
+      readOnly: true,
+      channelType: "weixin",
+      channelInstance: "account-sales",
+      participantLabel: "ontact",
+    }]);
+  });
+
   it("maps slash command metadata from the commands endpoint", async () => {
     vi.mocked(fetch).mockResolvedValueOnce({
       ok: true,

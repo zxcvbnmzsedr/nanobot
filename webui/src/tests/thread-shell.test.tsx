@@ -231,6 +231,36 @@ describe("ThreadShell", () => {
     );
   });
 
+  it("renders WeChat history as read-only without a composer", async () => {
+    const client = makeClient();
+    vi.mocked(fetch).mockResolvedValueOnce(httpJson(transcriptFromSimpleMessages([
+      { role: "user", content: "你好" },
+      { role: "assistant", content: "你好，有什么可以帮你？" },
+    ])) as Response);
+
+    render(wrap(
+      client,
+      <ThreadShell
+        session={{
+          ...session("contact@im.wechat"),
+          key: "weixin:contact@im.wechat",
+          channel: "weixin",
+          readOnly: true,
+          channelType: "weixin",
+        }}
+        title="WeChat conversation"
+        onToggleSidebar={() => {}}
+      />,
+    ));
+
+    expect(await screen.findByText("你好，有什么可以帮你？")).toBeInTheDocument();
+    expect(screen.getByTestId("external-session-read-only")).toHaveTextContent(
+      "This conversation is sent and received in WeChat. WebUI is read-only.",
+    );
+    expect(screen.queryByRole("textbox", { name: "Message input" })).not.toBeInTheDocument();
+    expect(client.sendMessage).not.toHaveBeenCalled();
+  });
+
   it("does not navigate away when clicking the chat title", async () => {
     const client = makeClient();
     const onGoHome = vi.fn();

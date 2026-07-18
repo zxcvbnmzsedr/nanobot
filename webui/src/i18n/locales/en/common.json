@@ -591,6 +591,14 @@
       "weixinConnected": "WeChat is connected.",
       "weixinConnectStopped": "WeChat login stopped.",
       "weixinConnecting": "Connecting...",
+      "oneWeixinAccount": "1 WeChat account connected",
+      "manyWeixinAccounts": "Multiple WeChat accounts connected",
+      "weixinAccount": "WeChat account",
+      "weixinConfigured": "Connected",
+      "weixinNotConfigured": "Needs connection",
+      "reconnectWeixin": "Reconnect",
+      "addWeixinAccount": "Add another WeChat account",
+      "addWeixinAccountHint": "Each account receives and replies independently while sharing the institution identity.",
       "items": {
         "websocket": {
           "displayName": "WebSocket",
@@ -910,6 +918,8 @@
     "hideArchived": "Hide archived",
     "delete": "Delete",
     "newChat": "New chat",
+    "weixinChannel": "WeChat",
+    "weixinConversation": "WeChat conversation · {{id}}",
     "groups": {
       "pinned": "Pinned",
       "all": "Chats",
@@ -953,6 +963,7 @@
   },
   "thread": {
     "loadingConversation": "Loading conversation…",
+    "externalSessionReadOnly": "This conversation is sent and received in WeChat. WebUI is read-only.",
     "empty": {
       "greetings": {
         "workOn": "What should we work on?",

@@ -1633,6 +1633,17 @@ class AgentLoop:
         if ctx.session is None:
             ctx.session = self.sessions.get_or_create(ctx.session_key)
         await self._runtime_events().session_turn_started(msg, ctx.session_key)
+        identity = msg.metadata.get(IDENTITY_METADATA_KEY)
+        if (
+            isinstance(identity, Mapping)
+            and identity.get("source") == "kangaroo"
+            and isinstance(identity.get("user_scope"), str)
+            and isinstance(identity.get("user_id"), str)
+            and isinstance(identity.get("org_id"), str)
+            and ctx.session.metadata.get(IDENTITY_METADATA_KEY) != identity
+        ):
+            ctx.session.metadata[IDENTITY_METADATA_KEY] = dict(identity)
+            self.sessions.save(ctx.session)
         self.workspace_scopes.persist_message_scope(ctx.session, msg)
 
         if self._restore_runtime_checkpoint(ctx.session):

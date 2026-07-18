@@ -582,6 +582,14 @@
       "weixinConnected": "微信已连接。",
       "weixinConnectStopped": "微信登录已停止。",
       "weixinConnecting": "正在连接...",
+      "oneWeixinAccount": "已连接 1 个微信账号",
+      "manyWeixinAccounts": "已连接多个微信账号",
+      "weixinAccount": "微信账号",
+      "weixinConfigured": "已连接",
+      "weixinNotConfigured": "需要连接",
+      "reconnectWeixin": "重新连接",
+      "addWeixinAccount": "添加另一个微信账号",
+      "addWeixinAccountHint": "每个微信账号独立收发消息，并统一使用当前机构身份。",
       "items": {
         "websocket": {
           "displayName": "WebSocket",
@@ -901,6 +909,8 @@
     "hideArchived": "隐藏归档",
     "delete": "删除",
     "newChat": "新建对话",
+    "weixinChannel": "微信",
+    "weixinConversation": "微信会话 · {{id}}",
     "groups": {
       "pinned": "置顶",
       "all": "对话",
@@ -944,6 +954,7 @@
   },
   "thread": {
     "loadingConversation": "正在加载对话…",
+    "externalSessionReadOnly": "这是微信侧会话，消息仍由微信端收发，网页仅供查看。",
     "empty": {
       "greetings": {
         "workOn": "我们要一起做点什么？",

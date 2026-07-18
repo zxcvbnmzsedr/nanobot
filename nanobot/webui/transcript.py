@@ -776,11 +776,10 @@ def append_fork_marker(session_key: str) -> None:
     )
 
 
-def write_session_messages_as_transcript(
+def _session_messages_as_transcript_rows(
     target_key: str,
     messages: list[dict[str, Any]],
-) -> None:
-    """Write a minimal WebUI transcript from already-truncated session messages."""
+) -> list[dict[str, Any]]:
     target_chat_id = _chat_id_from_session_key(target_key)
     rows: list[dict[str, Any]] = []
     for msg in messages:
@@ -807,7 +806,41 @@ def write_session_messages_as_transcript(
         else:
             continue
         rows.append(row)
+    return rows
+
+
+def write_session_messages_as_transcript(
+    target_key: str,
+    messages: list[dict[str, Any]],
+) -> None:
+    """Write a minimal WebUI transcript from already-truncated session messages."""
+    rows = _session_messages_as_transcript_rows(target_key, messages)
     _write_transcript_lines(target_key, rows)
+
+
+def build_session_messages_thread_response(
+    session_key: str,
+    session_messages: list[dict[str, Any]],
+    *,
+    augment_user_media: Callable[[list[str]], list[dict[str, Any]]] | None = None,
+    augment_assistant_media: Callable[[list[str]], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any] | None:
+    """Build a read-only WebUI thread directly from a channel session."""
+    lines = _session_messages_as_transcript_rows(session_key, session_messages)
+    if not lines:
+        return None
+    messages = replay_transcript_to_ui_messages(
+        lines,
+        augment_user_media=augment_user_media,
+        augment_assistant_media=augment_assistant_media,
+    )
+    return {
+        "schemaVersion": WEBUI_TRANSCRIPT_SCHEMA_VERSION,
+        "sessionKey": session_key,
+        "messages": messages,
+        "has_pending_tool_calls": False,
+        "read_only": True,
+    }
 
 
 def delete_webui_transcript(session_key: str) -> bool:

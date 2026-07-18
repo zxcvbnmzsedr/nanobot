@@ -42,6 +42,7 @@ import {
   ChannelValidationDetails,
 } from "@/components/settings/channels/ChannelSetupParts";
 import { FeishuAssistantsPanel } from "@/components/settings/channels/FeishuAssistantsPanel";
+import { WeixinAccountsPanel } from "@/components/settings/channels/WeixinAccountsPanel";
 import { Button } from "@/components/ui/button";
 import {
   configureChannel,
@@ -131,6 +132,17 @@ export function ChannelSetupPanel({
   if (feature.name === "feishu") {
     return (
       <FeishuAssistantsPanel
+        token={token}
+        feature={feature}
+        showBrandLogos={showBrandLogos}
+        chatAppsDocsUrl={chatAppsDocsUrl}
+        onFeaturesUpdate={onFeaturesUpdate}
+      />
+    );
+  }
+  if (feature.name === "weixin") {
+    return (
+      <WeixinAccountsPanel
         token={token}
         feature={feature}
         showBrandLogos={showBrandLogos}

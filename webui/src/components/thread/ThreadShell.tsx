@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useTranslation } from "react-i18next";
+import { MessageCircle } from "lucide-react";
 
 import { FilePreviewPanel } from "@/components/FilePreviewPanel";
 import { PromptNavigator } from "@/components/thread/PromptNavigator";
@@ -299,6 +300,7 @@ export function ThreadShell({
   const { t } = useTranslation();
   const chatId = session?.chatId ?? null;
   const historyKey = session?.key ?? null;
+  const readOnlyChannel = session?.readOnly === true;
   const {
     messages: historical,
     loading,
@@ -350,6 +352,14 @@ export function ThreadShell({
   const pendingCanonicalHydrateRef = useRef<Set<string>>(new Set());
   const sessionKeyByChatIdRef = useRef<Map<string, string>>(new Map());
   const bottomScrolledChatIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!readOnlyChannel) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "hidden") refreshHistory();
+    }, 3_000);
+    return () => window.clearInterval(timer);
+  }, [readOnlyChannel, refreshHistory]);
 
   const initial = useMemo(() => {
     if (!chatId) return historical;
@@ -720,7 +730,15 @@ export function ThreadShell({
     [chatId, onForkChat],
   );
 
-  const composer = (
+  const composer = readOnlyChannel ? (
+    <div
+      data-testid="external-session-read-only"
+      className="mx-auto flex min-h-12 w-full max-w-[46rem] items-center justify-center gap-2 border-t border-border/60 px-4 py-3 text-[13px] text-muted-foreground"
+    >
+      <MessageCircle className="h-4 w-4 shrink-0 text-[#07c160]" aria-hidden />
+      <span>{t("thread.externalSessionReadOnly")}</span>
+    </div>
+  ) : (
     <>
       {streamError ? (
         <StreamErrorNotice
@@ -807,7 +825,7 @@ export function ThreadShell({
       </h1>
     </div>
   );
-  const sessionInfoAction = historyKey ? (
+  const sessionInfoAction = historyKey && !readOnlyChannel ? (
     <SessionInfoPopover sessionKey={historyKey} token={token} title={title} />
   ) : undefined;
   const promptNavigatorAction = historyKey ? (
@@ -851,8 +869,8 @@ export function ThreadShell({
           loadingOlder={loadingOlder}
           userMessageOffset={userMessageOffset}
           onLoadOlder={loadOlder}
-          onOpenFilePreview={historyKey ? handleOpenFilePreview : undefined}
-          onForkFromMessage={onForkChat ? handleForkFromMessage : undefined}
+          onOpenFilePreview={historyKey && !readOnlyChannel ? handleOpenFilePreview : undefined}
+          onForkFromMessage={onForkChat && !readOnlyChannel ? handleForkFromMessage : undefined}
         />
       </div>
       {filePreviewPath && historyKey ? (

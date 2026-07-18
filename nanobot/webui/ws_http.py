@@ -28,10 +28,10 @@ from websockets.http11 import Response
 from nanobot.command.builtin import builtin_command_palette
 from nanobot.cron.session_turns import is_bound_cron_job
 from nanobot.cron.types import CronJob, CronSchedule
-from nanobot.identity.credentials import KangarooCredentialStore
+from nanobot.identity.credentials import KangarooCredentialStore, KangarooInstanceBindingError
 from nanobot.identity.handoff import HandoffStore
 from nanobot.identity.kangaroo import KangarooIdentityError, KangarooIdentityVerifier
-from nanobot.identity.principal import Principal
+from nanobot.identity.principal import IDENTITY_METADATA_KEY, Principal
 from nanobot.identity.runtime import TenantRuntimeStore
 from nanobot.runtime_context import public_history_messages
 from nanobot.triggers.local_types import LocalTrigger
@@ -88,7 +88,10 @@ from nanobot.webui.sidebar_state import (
 )
 from nanobot.webui.skills_api import webui_skill_detail_payload, webui_skills_payload
 from nanobot.webui.thread_disk import delete_webui_thread
-from nanobot.webui.transcript import build_webui_thread_response
+from nanobot.webui.transcript import (
+    build_session_messages_thread_response,
+    build_webui_thread_response,
+)
 from nanobot.webui.workspaces import WebUIWorkspaceController
 
 _SLOW_WEBUI_HTTP_LOG_MS = 1_000
@@ -132,7 +135,7 @@ def _basic_credentials(headers: Any) -> tuple[str, str] | None:
 
 def _decode_api_key(raw_key: str) -> str | None:
     key = unquote(raw_key)
-    _api_key_re = re.compile(r"^[A-Za-z0-9_:.-]{1,128}$")
+    _api_key_re = re.compile(r"^[A-Za-z0-9_:@.-]{1,128}$")
     if _api_key_re.match(key) is None:
         return None
     return key
@@ -254,11 +257,32 @@ class GatewayHTTPHandler:
     def _request_can_access_session(self, request: WsRequest, session_key: str) -> bool:
         principal = self.api_principal(request)
         if principal is None:
-            return True
-        if not session_key.startswith("websocket:"):
+            return _is_websocket_channel_session_key(session_key)
+        if _is_websocket_channel_session_key(session_key):
+            runtime = self.tenant_runtimes.for_principal(principal)
+            return runtime.owns_chat_id(session_key.split(":", 1)[1])
+        if not _is_weixin_channel_session_key(session_key):
             return False
-        runtime = self.tenant_runtimes.for_principal(principal)
-        return runtime.owns_chat_id(session_key.split(":", 1)[1])
+        return self._is_instance_principal(principal) and self._session_belongs_to_principal(
+            session_key,
+            principal,
+        )
+
+    def _session_belongs_to_principal(
+        self,
+        session_key: str,
+        principal: Principal,
+    ) -> bool:
+        if self.session_manager is None:
+            return False
+        row = self.session_manager.read_session_metadata(session_key)
+        metadata = row.get("metadata") if isinstance(row, dict) else None
+        identity = metadata.get(IDENTITY_METADATA_KEY) if isinstance(metadata, dict) else None
+        return bool(
+            isinstance(identity, dict)
+            and identity.get("user_scope") == principal.user_scope
+            and identity.get("org_scope") == principal.org_scope
+        )
 
     # -- Main dispatch ------------------------------------------------------
 
@@ -292,8 +316,16 @@ class GatewayHTTPHandler:
         if auth_config.enabled and got == auth_config.logout_path:
             return self._handle_kangaroo_logout(request)
 
-        if self.api_principal(request) is not None and got.startswith("/api/settings/"):
-            return _http_error(403, "Account runtimes cannot modify gateway settings")
+        principal = self.api_principal(request)
+        if (
+            principal is not None
+            and got.startswith("/api/settings/")
+            and not self._is_instance_principal(principal)
+        ):
+            return _http_error(
+                403,
+                "Only the bound institution account can modify gateway settings",
+            )
 
         # Settings routes (delegated)
         response = await self.settings_routes.dispatch(connection, request, got)
@@ -346,6 +378,14 @@ class GatewayHTTPHandler:
             elapsed_ms,
         )
 
+    def _is_instance_principal(self, principal: Principal) -> bool:
+        bound = self.credential_store.instance_principal()
+        return bool(
+            bound is not None
+            and bound.user_scope == principal.user_scope
+            and bound.org_scope == principal.org_scope
+        )
+
     # -- Bootstrap ----------------------------------------------------------
 
     def _login_rate_limited(self, connection: Any) -> bool:
@@ -388,8 +428,13 @@ class GatewayHTTPHandler:
         try:
             identity = await self.identity_verifier.login_with_access_token(*credentials)
             principal = identity.principal
+            self.credential_store.put_instance_identity(identity)
             code = self.handoffs.issue(principal, self.config.kangaroo_auth.handoff_ttl_s)
-            self.credential_store.put_identity(identity)
+        except KangarooInstanceBindingError:
+            return _no_store_json_response(
+                {"error": "当前 nanobot 已绑定其他机构账号。"},
+                status=403,
+            )
         except KangarooIdentityError as exc:
             self._log.info("Kangaroo account login rejected: {}", exc)
             return _no_store_json_response(
@@ -417,8 +462,10 @@ class GatewayHTTPHandler:
             return _http_error(401, "Missing Kangaroo access token")
         try:
             principal = await self.identity_verifier.verify(access_token)
+            self.credential_store.put_instance(principal, access_token)
             code = self.handoffs.issue(principal, self.config.kangaroo_auth.handoff_ttl_s)
-            self.credential_store.put(principal, access_token)
+        except KangarooInstanceBindingError:
+            return _http_error(403, "nanobot instance is bound to another institution account")
         except KangarooIdentityError as exc:
             self._log.info("Kangaroo token exchange rejected: {}", exc)
             return _http_error(exc.http_status, str(exc))
@@ -550,19 +597,45 @@ class GatewayHTTPHandler:
         cleaned = []
         for s in sessions:
             key = s.get("key")
-            if not (isinstance(key, str) and key.startswith("websocket:")):
+            if not isinstance(key, str):
                 continue
-            if principal is not None and not self.tenant_runtimes.for_principal(
-                principal
-            ).owns_chat_id(key.split(":", 1)[1]):
+            is_websocket = _is_websocket_channel_session_key(key)
+            is_weixin = _is_weixin_channel_session_key(key)
+            if not is_websocket and not is_weixin:
+                continue
+            if is_weixin and principal is None:
+                continue
+            if principal is not None and not (
+                self.tenant_runtimes.for_principal(principal).owns_chat_id(
+                    key.split(":", 1)[1]
+                )
+                if is_websocket
+                else self._is_instance_principal(principal)
+                and self._session_belongs_to_principal(key, principal)
+            ):
                 continue
             row = {k: v for k, v in s.items() if k != "path"}
             chat_id = key.split(":", 1)[1]
-            started_at = websocket_turn_wall_started_at(chat_id)
-            if started_at is not None:
-                row["run_started_at"] = started_at
-            scope = self.workspaces.scope_for_session_key(key)
-            row["workspace_scope"] = scope.payload()
+            if is_websocket:
+                started_at = websocket_turn_wall_started_at(chat_id)
+                if started_at is not None:
+                    row["run_started_at"] = started_at
+                scope = self.workspaces.scope_for_session_key(key)
+                row["workspace_scope"] = scope.payload()
+            else:
+                channel_name = key.split(":", 1)[0]
+                participant = chat_id.split("@", 1)[0]
+                row.update({
+                    "read_only": True,
+                    "channel_type": "weixin",
+                    "channel_instance": (
+                        channel_name.split(".", 1)[1]
+                        if "." in channel_name
+                        else "default"
+                    ),
+                    "participant_label": participant[-6:] if participant else "",
+                    "workspace_scope": None,
+                })
             cleaned.append(row)
         return {"sessions": cleaned}
 
@@ -596,11 +669,15 @@ class GatewayHTTPHandler:
         decoded_key = _decode_api_key(key)
         if decoded_key is None:
             return _http_error(400, "invalid session key")
-        if not _is_websocket_channel_session_key(decoded_key):
+        if not (
+            _is_websocket_channel_session_key(decoded_key)
+            or _is_weixin_channel_session_key(decoded_key)
+        ):
             return _http_error(404, "session not found")
         if not self._request_can_access_session(request, decoded_key):
             return _http_error(404, "session not found")
-        scope = self.workspaces.scope_for_session_key(decoded_key)
+        is_weixin = _is_weixin_channel_session_key(decoded_key)
+        scope = None if is_weixin else self.workspaces.scope_for_session_key(decoded_key)
         session_messages: list[dict[str, Any]] | None = None
         if self.session_manager is not None:
             session_data = self.session_manager.read_session_file(decoded_key)
@@ -619,22 +696,31 @@ class GatewayHTTPHandler:
         if direction is not None and direction not in {"latest"}:
             return _http_error(400, "invalid direction")
         before = _query_first(query, "before")
-        data = build_webui_thread_response(
-            decoded_key,
-            augment_user_media=self.media.augment_transcript_media,
-            augment_assistant_media=self.media.augment_transcript_media,
-            augment_assistant_text=lambda text: self.media.rewrite_local_markdown_images(
-                text,
-                workspace_path=scope.project_path,
-            ),
-            session_messages=session_messages,
-            limit=limit,
-            direction=direction,
-            before=before,
-        )
+        if is_weixin:
+            data = build_session_messages_thread_response(
+                decoded_key,
+                session_messages or [],
+                augment_user_media=self.media.augment_transcript_media,
+                augment_assistant_media=self.media.augment_transcript_media,
+            )
+        else:
+            assert scope is not None
+            data = build_webui_thread_response(
+                decoded_key,
+                augment_user_media=self.media.augment_transcript_media,
+                augment_assistant_media=self.media.augment_transcript_media,
+                augment_assistant_text=lambda text: self.media.rewrite_local_markdown_images(
+                    text,
+                    workspace_path=scope.project_path,
+                ),
+                session_messages=session_messages,
+                limit=limit,
+                direction=direction,
+                before=before,
+            )
         if data is None:
             return _http_error(404, "webui thread not found")
-        data["workspace_scope"] = scope.payload()
+        data["workspace_scope"] = scope.payload() if scope is not None else None
         return _http_json_response(data)
 
     def _handle_file_preview(self, request: WsRequest, key: str) -> Response:
@@ -1243,3 +1329,8 @@ def _positive_int(value: Any) -> int | None:
 
 def _is_websocket_channel_session_key(key: str) -> bool:
     return key.startswith("websocket:")
+
+
+def _is_weixin_channel_session_key(key: str) -> bool:
+    channel, separator, chat_id = key.partition(":")
+    return bool(separator and chat_id and (channel == "weixin" or channel.startswith("weixin.")))

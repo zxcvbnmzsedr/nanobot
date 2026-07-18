@@ -1,6 +1,7 @@
 import base64
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from websockets.datastructures import Headers
@@ -195,6 +196,7 @@ async def test_exchange_and_bootstrap_keep_the_verified_identity(tmp_path: Path)
     grant = gateway.tokens.take_issued_grant_if_valid(bootstrap_body["token"])
     assert grant is not None and grant.principal == principal
     assert credential_store.get(principal.user_scope) == "kangaroo-token"
+    assert credential_store.instance_principal() == principal
     credential_store.clear()
 
 
@@ -254,6 +256,7 @@ async def test_native_login_returns_identity_handoff_without_upstream_tokens(
     assert "access_token" not in body
     assert "refresh_token" not in body
     assert credential_store.get(principal.user_scope) == "native-login-token"
+    assert credential_store.instance_principal() == principal
 
     bootstrap = gateway.http._handle_bootstrap(
         RemoteConnection(),
@@ -271,12 +274,71 @@ async def test_native_login_returns_identity_handoff_without_upstream_tokens(
     )
     assert logout.status_code == 200
     assert credential_store.get(principal.user_scope) is None
+    assert credential_store.instance_principal() is None
     assert not gateway.tokens.check_api_token(
         Request(
             "/api/sessions",
             Headers({"Authorization": f"Bearer {api_token}"}),
         )
     )
+    credential_store.clear()
+
+
+@pytest.mark.asyncio
+async def test_only_bound_institution_account_can_access_gateway_settings(
+    tmp_path: Path,
+) -> None:
+    config = WebSocketConfig.model_validate({
+        "kangarooAuth": {
+            "enabled": True,
+            "apiBase": "https://accounts.example.com/",
+            "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+            "memoryApiUrl": "https://agent.example.com/nanobot/memory",
+            "runtimeRoot": str(tmp_path / "tenants"),
+        },
+    })
+    gateway = build_gateway_services(
+        config=config,
+        bus=MessageBus(),
+        session_manager=None,
+        static_dist_path=None,
+        workspace_path=tmp_path / "system",
+        default_restrict_to_workspace=False,
+        runtime_model_name=None,
+        runtime_surface="browser",
+        runtime_capabilities_overrides=None,
+    )
+    credential_store = get_kangaroo_credential_store()
+    credential_store.clear()
+    institution = _principal("institution", "org-1")
+    other = _principal("other", "org-2")
+    credential_store.put_instance(institution, "institution-token")
+    institution_token = gateway.tokens.issue_api_token(60, institution)
+    other_token = gateway.tokens.issue_api_token(60, other)
+    allowed_response = object()
+    gateway.http.settings_routes.dispatch = AsyncMock(return_value=allowed_response)
+
+    allowed = await gateway.http._dispatch_resolved(
+        object(),
+        Request(
+            "/api/settings/channels/weixin/connect/start",
+            Headers({"Authorization": f"Bearer {institution_token}"}),
+        ),
+        "/api/settings/channels/weixin/connect/start",
+    )
+    denied = await gateway.http._dispatch_resolved(
+        object(),
+        Request(
+            "/api/settings/channels/weixin/connect/start",
+            Headers({"Authorization": f"Bearer {other_token}"}),
+        ),
+        "/api/settings/channels/weixin/connect/start",
+    )
+
+    assert allowed is allowed_response
+    assert denied.status_code == 403
+    assert b"bound institution account" in denied.body
+    gateway.http.settings_routes.dispatch.assert_awaited_once()
     credential_store.clear()
 
 
