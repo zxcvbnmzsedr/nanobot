@@ -14,6 +14,7 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 from websockets.frames import Close
 
+from nanobot.agent.memory_sync import MemorySyncConflictError, MemorySyncPermissionError
 from nanobot.bus.events import OUTBOUND_META_AGENT_UI, OutboundMessage
 from nanobot.bus.outbound_events import (
     GoalStateSyncEvent,
@@ -340,6 +341,130 @@ def test_default_config_includes_safe_bind_and_streaming() -> None:
 def test_gateway_key_auth_config_is_rejected(legacy_key: str) -> None:
     with pytest.raises(ValueError, match="gateway key authentication has been removed"):
         WebSocketConfig.model_validate({legacy_key: "legacy-secret"})
+
+
+@pytest.mark.asyncio
+async def test_memory_envelopes_use_authenticated_connection_identity(
+    bus: MagicMock,
+    tmp_path: Path,
+) -> None:
+    channel, _, principal = _authenticated_channel(bus, tmp_path)
+    connection = AsyncMock()
+    channel._conn_principals[connection] = principal
+    memory_client = MagicMock()
+    memory_client.get_management = AsyncMock(return_value={
+        "documents": [],
+        "userName": "Alice",
+        "orgName": "Acme",
+    })
+    memory_client.update_management = AsyncMock(return_value={
+        "document": {
+            "scopeType": "user",
+            "content": "updated",
+            "version": 2,
+            "canEdit": True,
+        },
+    })
+    channel._memory_client = memory_client
+
+    await channel._dispatch_envelope(
+        connection,
+        "kangaroo:101",
+        {"type": "memory_get", "request_id": "get-1"},
+    )
+    await channel._dispatch_envelope(
+        connection,
+        "kangaroo:101",
+        {
+            "type": "memory_update",
+            "request_id": "put-1",
+            "scopeType": "user",
+            "content": "updated",
+            "expectedVersion": 1,
+        },
+    )
+
+    memory_client.get_management.assert_awaited_once_with(principal.user_scope)
+    memory_client.update_management.assert_awaited_once_with(
+        principal.user_scope,
+        {"scopeType": "user", "content": "updated", "expectedVersion": 1},
+    )
+    events = _sent_ws_payloads(connection)
+    assert events[0]["event"] == "memory_result"
+    assert events[0]["request_id"] == "get-1"
+    assert events[1]["payload"]["document"]["version"] == 2
+
+
+@pytest.mark.asyncio
+async def test_memory_envelope_rejects_unauthenticated_and_invalid_updates(
+    bus: MagicMock,
+) -> None:
+    channel = _ch(bus)
+    connection = AsyncMock()
+    memory_client = MagicMock()
+    memory_client.update_management = AsyncMock()
+    channel._memory_client = memory_client
+
+    await channel._dispatch_envelope(
+        connection,
+        "anonymous",
+        {"type": "memory_get", "request_id": "get-1"},
+    )
+    channel._conn_principals[connection] = Principal(user_id="101", org_id="9001")
+    await channel._dispatch_envelope(
+        connection,
+        "kangaroo:101",
+        {
+            "type": "memory_update",
+            "request_id": "put-1",
+            "scopeType": "user",
+            "content": "updated",
+            "expectedVersion": True,
+        },
+    )
+
+    events = _sent_ws_payloads(connection)
+    assert [(event["status"], event["detail"]) for event in events] == [
+        (403, "account_auth_required"),
+        (400, "invalid_request"),
+    ]
+    memory_client.update_management.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_memory_envelope_maps_permission_and_conflict_errors(
+    bus: MagicMock,
+) -> None:
+    channel = _ch(bus)
+    connection = AsyncMock()
+    channel._conn_principals[connection] = Principal(user_id="101", org_id="9001")
+
+    async def reject(_user_scope: str, payload: dict[str, Any]) -> None:
+        if payload["scopeType"] == "org":
+            raise MemorySyncPermissionError("forbidden")
+        raise MemorySyncConflictError("stale")
+
+    memory_client = MagicMock()
+    memory_client.update_management = AsyncMock(side_effect=reject)
+    channel._memory_client = memory_client
+    for scope_type in ("org", "user"):
+        await channel._dispatch_envelope(
+            connection,
+            "kangaroo:101",
+            {
+                "type": "memory_update",
+                "request_id": scope_type,
+                "scopeType": scope_type,
+                "content": "updated",
+                "expectedVersion": 1,
+            },
+        )
+
+    events = _sent_ws_payloads(connection)
+    assert [(event["status"], event["detail"]) for event in events] == [
+        (403, "permission_denied"),
+        (409, "conflict"),
+    ]
 
 
 @pytest.mark.asyncio

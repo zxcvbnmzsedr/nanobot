@@ -64,6 +64,7 @@
     "noSearchResults": "沒有符合的對話。",
     "recent": "最近對話",
     "settings": "設定",
+    "memory": "記憶",
     "language": {
       "label": "語言",
       "ariaLabel": "切換語言"
@@ -73,6 +74,11 @@
     "skills": {
       "title": "技能"
     }
+  },
+  "memory": {
+    "title": "記憶", "scopePicker": "記憶範圍", "refresh": "重新整理記憶", "loading": "正在載入記憶...", "version": "版本 {{version}}", "editorLabel": "{{scope}}編輯器", "empty": "目前範圍尚未儲存記憶。", "readOnly": "目前帳號只有檢視權限。", "save": "儲存", "saving": "正在儲存...", "saved": "已儲存",
+    "scopes": {"system": {"name": "系統", "description": "對所有機構和帳號生效。"}, "org": {"name": "機構", "description": "對目前機構內所有帳號生效。"}, "user": {"name": "個人", "description": "僅對目前帳號生效。"}},
+    "errors": {"load": "記憶載入失敗。", "save": "記憶儲存失敗。", "permission": "目前帳號不能修改這層記憶。", "conflict": "記憶已被其他操作修改，內容已重新載入。"}
   },
   "settings": {
     "backToChat": "返回聊天",

@@ -112,6 +112,7 @@ def test_kangaroo_auth_rejects_principal_bypass_config(
                 "enabled": True,
                 "apiBase": "https://accounts.example.com/",
                 "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+                "memoryApiUrl": "https://agent.example.com/nanobot/memory",
             },
         })
 
@@ -126,6 +127,17 @@ def test_kangaroo_auth_requires_llm_proxy_url() -> None:
         })
 
 
+def test_kangaroo_auth_requires_memory_api_url() -> None:
+    with pytest.raises(ValueError, match="memory_api_url"):
+        WebSocketConfig.model_validate({
+            "kangarooAuth": {
+                "enabled": True,
+                "apiBase": "https://accounts.example.com/",
+                "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+            },
+        })
+
+
 @pytest.mark.asyncio
 async def test_exchange_and_bootstrap_keep_the_verified_identity(tmp_path: Path) -> None:
     config = WebSocketConfig.model_validate({
@@ -134,6 +146,7 @@ async def test_exchange_and_bootstrap_keep_the_verified_identity(tmp_path: Path)
             "enabled": True,
             "apiBase": "https://accounts.example.com/",
             "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+            "memoryApiUrl": "https://agent.example.com/nanobot/memory",
             "runtimeRoot": str(tmp_path / "tenants"),
         },
     })
@@ -195,6 +208,7 @@ async def test_native_login_returns_identity_handoff_without_upstream_tokens(
             "enabled": True,
             "apiBase": "https://accounts.example.com/",
             "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+            "memoryApiUrl": "https://agent.example.com/nanobot/memory",
             "runtimeRoot": str(tmp_path / "tenants"),
         },
     })
@@ -272,6 +286,7 @@ def test_kangaroo_mode_disables_localhost_bootstrap_bypass(tmp_path: Path) -> No
             "enabled": True,
             "apiBase": "https://accounts.example.com/",
             "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+            "memoryApiUrl": "https://agent.example.com/nanobot/memory",
             "runtimeRoot": str(tmp_path / "tenants"),
         },
     })

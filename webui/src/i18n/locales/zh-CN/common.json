@@ -64,6 +64,7 @@
     "noSearchResults": "没有匹配的会话。",
     "recent": "最近对话",
     "settings": "设置",
+    "memory": "记忆",
     "language": {
       "label": "语言",
       "ariaLabel": "切换语言"
@@ -72,6 +73,30 @@
     "automations": "自动任务",
     "skills": {
       "title": "技能"
+    }
+  },
+  "memory": {
+    "title": "记忆",
+    "scopePicker": "记忆范围",
+    "refresh": "刷新记忆",
+    "loading": "正在加载记忆...",
+    "version": "版本 {{version}}",
+    "editorLabel": "{{scope}}编辑器",
+    "empty": "当前范围还没有保存记忆。",
+    "readOnly": "当前账号只有查看权限。",
+    "save": "保存",
+    "saving": "正在保存...",
+    "saved": "已保存",
+    "scopes": {
+      "system": {"name": "系统", "description": "对所有机构和账号生效。"},
+      "org": {"name": "机构", "description": "对当前机构内所有账号生效。"},
+      "user": {"name": "个人", "description": "仅对当前账号生效。"}
+    },
+    "errors": {
+      "load": "记忆加载失败。",
+      "save": "记忆保存失败。",
+      "permission": "当前账号不能修改这层记忆。",
+      "conflict": "记忆已被其他操作修改，内容已重新加载。"
     }
   },
   "settings": {

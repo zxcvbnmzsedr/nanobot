@@ -207,6 +207,86 @@ def _commit_dream_changes(memory: Any) -> str | None:
     return memory.git.auto_commit(message)
 
 
+async def _run_periodic_dream(
+    agent: AgentLoop,
+    store: Any,
+    *,
+    metadata: dict[str, Any] | None,
+    timezone_name: str | None,
+) -> None:
+    from nanobot.agent.memory import MemoryStore
+    from nanobot.webui.token_usage import record_response_token_usage
+
+    async def _silent(*_args, **_kwargs):
+        pass
+
+    resp = None
+    commit_allowed = False
+    memory_sync = getattr(agent, "memory_sync", None)
+    lock_factory = getattr(memory_sync, "lock_for_store", None)
+    sync_lock = lock_factory(store) if callable(lock_factory) else None
+    if sync_lock is not None:
+        await sync_lock.acquire()
+    try:
+        result = store.build_dream_prompt()
+        if result is None:
+            logger.info("Dream: nothing to process for {}", store.workspace)
+            return
+        prompt, last_cursor = result
+        binding_for_store = getattr(memory_sync, "binding_for_store", None)
+        binding = binding_for_store(store) if callable(binding_for_store) else None
+        resp = await agent.process_direct(
+            prompt,
+            session_key=MemoryStore.dream_session_key(
+                str(binding.identity["user_scope"]) if binding is not None else None
+            ),
+            ephemeral=True,
+            tools=store.build_dream_tools(),
+            on_progress=_silent,
+            metadata=metadata,
+        )
+        diff_body = store.dream_content_diff()
+        productive = bool(diff_body) or (
+            not store.git.is_initialized()
+            and MemoryStore.dream_run_completed(resp)
+        )
+        if productive:
+            remote_committed = (
+                await memory_sync.commit_dream(store, last_cursor)
+                if memory_sync is not None
+                else True
+            )
+            if remote_committed:
+                store.set_last_dream_cursor(last_cursor)
+                commit_allowed = True
+                logger.info("Dream completed, cursor advanced to {}", last_cursor)
+            else:
+                logger.warning("Dream backend commit failed; cursor remains unchanged")
+        elif MemoryStore.dream_run_completed(resp):
+            logger.info("Dream completed with no memory changes; cursor not advanced")
+        else:
+            logger.warning(
+                "Dream did not complete; cursor remains at {}",
+                store.get_last_dream_cursor(),
+            )
+    except Exception:
+        logger.exception("Dream cron job failed for {}", store.workspace)
+    finally:
+        record_response_token_usage(
+            resp,
+            source="dream",
+            timezone_name=timezone_name,
+        )
+        if commit_allowed:
+            sha = _commit_dream_changes(store)
+            if sha:
+                logger.info("Dream commit: {}", sha)
+        store.compact_history()
+        MemoryStore.prune_dream_sessions(agent.sessions.sessions_dir)
+        if sync_lock is not None:
+            sync_lock.release()
+
+
 class SafeFileHistory(FileHistory):
     """FileHistory subclass that sanitizes surrogate characters on write.
 
@@ -1730,62 +1810,43 @@ def _run_gateway(
 
         # Dream is an internal job — run directly, not through the agent loop.
         if job.name == "dream":
-            from nanobot.agent.memory import MemoryStore
-
-            dream_session_key = MemoryStore.dream_session_key
-            prune_dream_sessions = MemoryStore.prune_dream_sessions
-
-            store = agent.context.memory
-            resp = None
-            diff_body = ""
-            try:
-                result = store.build_dream_prompt()
-                if result is None:
-                    logger.info("Dream: nothing to process")
-                    return None
-                prompt, last_cursor = result
-                key = dream_session_key()
-                resp = await agent.process_direct(
-                    prompt,
-                    session_key=key,
-                    ephemeral=True,
-                    tools=store.build_dream_tools(),
-                    on_progress=_silent,
+            memory_sync = getattr(agent, "memory_sync", None)
+            if memory_sync is not None:
+                from nanobot.identity.principal import IDENTITY_METADATA_KEY
+                from nanobot.security.workspace_access import (
+                    WORKSPACE_SCOPE_METADATA_KEY,
+                    build_workspace_scope,
                 )
-                # Ground truth: the real file delta, not the LLM's self-report.
-                diff_body = store.dream_content_diff()
-                productive = bool(diff_body) or (
-                    not store.git.is_initialized()
-                    and MemoryStore.dream_run_completed(resp)
-                )
-                if productive:
-                    store.set_last_dream_cursor(last_cursor)
-                    logger.info("Dream cron job completed, cursor advanced to {}", last_cursor)
-                elif MemoryStore.dream_run_completed(resp):
-                    logger.info(
-                        "Dream cron job completed with no memory changes; "
-                        "cursor not advanced",
+
+                for binding in memory_sync.active_bindings():
+                    ready = await memory_sync.prepare_turn(
+                        identity=binding.identity,
+                        system_store=binding.system_store,
+                        user_store=binding.store,
                     )
-                else:
-                    logger.warning(
-                        "Dream cron job did not complete; cursor remains at {}",
-                        store.get_last_dream_cursor(),
+                    if not ready:
+                        continue
+                    metadata = {
+                        IDENTITY_METADATA_KEY: dict(binding.identity),
+                        WORKSPACE_SCOPE_METADATA_KEY: build_workspace_scope(
+                            binding.store.workspace,
+                            "restricted",
+                            source_channel="system",
+                        ).metadata(),
+                    }
+                    await _run_periodic_dream(
+                        agent,
+                        binding.store,
+                        metadata=metadata,
+                        timezone_name=config.agents.defaults.timezone,
                     )
-            except Exception:
-                logger.exception("Dream cron job failed")
-            finally:
-                from nanobot.webui.token_usage import record_response_token_usage
-
-                record_response_token_usage(
-                    resp,
-                    source="dream",
-                    timezone_name=config.agents.defaults.timezone,
-                )
-                sha = _commit_dream_changes(store)
-                if sha:
-                    logger.info("Dream commit: {}", sha)
-                store.compact_history()
-                prune_dream_sessions(agent.sessions.sessions_dir)
+                return None
+            await _run_periodic_dream(
+                agent,
+                agent.context.memory,
+                metadata=None,
+                timezone_name=config.agents.defaults.timezone,
+            )
             return None
 
         # Heartbeat is a system job that checks HEARTBEAT.md for active tasks.
@@ -1980,7 +2041,8 @@ def _run_gateway(
         console.print(f"[green]✓[/green] Dream: {dream_cfg.describe_schedule()}")
     else:
         console.print("[yellow]○[/yellow] Dream: disabled")
-        _advance_dream_cursor_if_behind(agent.context.memory)
+        if getattr(agent, "memory_sync", None) is None:
+            _advance_dream_cursor_if_behind(agent.context.memory)
 
     # Register Heartbeat system job (idempotent on restart)
     if hb_cfg.enabled:

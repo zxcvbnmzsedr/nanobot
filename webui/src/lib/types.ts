@@ -319,6 +319,25 @@ export interface BootstrapResponse {
   };
 }
 
+export type MemoryScopeType = "system" | "org" | "user";
+
+export interface ManagedMemoryDocument {
+  scopeType: MemoryScopeType;
+  content: string;
+  version: number;
+  canEdit: boolean;
+}
+
+export interface MemoryManagementPayload {
+  documents: ManagedMemoryDocument[];
+  userName: string;
+  orgName: string;
+}
+
+export interface ManagedMemoryUpdatePayload {
+  document: ManagedMemoryDocument;
+}
+
 export interface KangarooLoginResponse {
   handoff_code: string;
   expires_in: number;
@@ -1066,6 +1085,17 @@ export type InboundEvent =
       detail?: string;
       provider?: string;
     }
+  | {
+      event: "memory_result";
+      request_id: string;
+      payload: MemoryManagementPayload | ManagedMemoryUpdatePayload;
+    }
+  | {
+      event: "memory_error";
+      request_id?: string;
+      status: number;
+      detail: string;
+    }
   | { event: "error"; chat_id?: string; detail?: string; reason?: string };
 
 /** Base64-encoded image attached to an outbound ``message`` envelope.
@@ -1137,6 +1167,14 @@ export type Outbound =
   | { type: "attach"; chat_id: string }
   | { type: "set_workspace_scope"; chat_id: string; workspace_scope: WorkspaceScopePayload }
   | { type: "transcribe_audio"; request_id: string; data_url: string; duration_ms?: number }
+  | { type: "memory_get"; request_id: string }
+  | {
+      type: "memory_update";
+      request_id: string;
+      scopeType: MemoryScopeType;
+      content: string;
+      expectedVersion: number;
+    }
   | {
       type: "message";
       chat_id: string;

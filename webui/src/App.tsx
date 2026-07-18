@@ -13,6 +13,7 @@ import { DeleteConfirm } from "@/components/DeleteConfirm";
 import { RenameChatDialog } from "@/components/RenameChatDialog";
 import { Sidebar } from "@/components/Sidebar";
 import { SessionSearchDialog } from "@/components/SessionSearchDialog";
+import { MemoryView } from "@/components/memory/MemoryView";
 import { SettingsView, type SettingsSectionKey } from "@/components/settings/SettingsView";
 import { ThreadShell } from "@/components/thread/ThreadShell";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
@@ -90,7 +91,7 @@ const TOKEN_REFRESH_MARGIN_MS = 30_000;
 const TOKEN_REFRESH_MIN_DELAY_MS = 5_000;
 const PAIRING_POLL_INTERVAL_MS = 5_000;
 const PAIRING_DISMISS_SNOOZE_MS = 30_000;
-type ShellView = "chat" | "settings" | "apps" | "automations" | "skills";
+type ShellView = "chat" | "memory" | "settings" | "apps" | "automations" | "skills";
 type ShellRoute = {
   view: ShellView;
   activeKey: string | null;
@@ -291,6 +292,9 @@ function readShellRoute(): ShellRoute {
   }
   if (path === "/skills") {
     return { view: "skills", activeKey, settingsSection: "skills" };
+  }
+  if (path === "/memory") {
+    return { view: "memory", activeKey, settingsSection: "overview" };
   }
   if (path.startsWith("/chat/")) {
     const encoded = path.slice("/chat/".length);
@@ -1716,6 +1720,12 @@ function Shell({
     onOpenSettings("models");
   }, [onOpenSettings]);
 
+  const onOpenMemory = useCallback(() => {
+    setSessionSearchOpen(false);
+    navigate({ view: "memory", activeKey, settingsSection: "overview" });
+    setMobileSidebarOpen(false);
+  }, [activeKey, navigate]);
+
   const onOpenApps = useCallback(() => {
     setSessionSearchOpen(false);
     navigate({ view: "apps", activeKey, settingsSection: "apps" });
@@ -1961,6 +1971,10 @@ function Shell({
       });
       return;
     }
+    if (view === "memory") {
+      document.title = t("app.documentTitle.chat", { title: t("memory.title") });
+      return;
+    }
     document.title = activeSession
       ? t("app.documentTitle.chat", { title: headerTitle })
       : t("app.documentTitle.base");
@@ -1980,11 +1994,15 @@ function Shell({
     onRequestRenameProject,
     onNewChatInProject,
     onOpenSettings,
+    onOpenMemory,
     onOpenApps,
     onOpenAutomations,
     onOpenSkills,
     onOpenSearch: onOpenSessionSearch,
-    activeUtility: view === "apps" || view === "automations" || view === "skills" ? view : null,
+    activeUtility:
+      view === "memory" || view === "apps" || view === "automations" || view === "skills"
+        ? view
+        : null,
     onToggleArchived,
     pinnedKeys: sidebarState.pinned_keys,
     archivedKeys: sidebarState.archived_keys,
@@ -2171,7 +2189,12 @@ function Shell({
                 skills={skills}
               />
             </div>
-            {view !== "chat" && (
+            {view === "memory" ? (
+              <div className="absolute inset-0 flex flex-col">
+                <MemoryView client={client} onToggleSidebar={toggleSidebar} />
+              </div>
+            ) : null}
+            {view !== "chat" && view !== "memory" ? (
               <div className="absolute inset-0 flex flex-col">
                 <SettingsView
                   theme={theme}
@@ -2192,7 +2215,7 @@ function Shell({
                   hostChromeInset={showHostChrome}
                 />
               </div>
-            )}
+            ) : null}
           </main>
         </div>
 

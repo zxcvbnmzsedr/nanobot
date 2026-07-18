@@ -235,6 +235,76 @@ async def test_runtime_context_provider_runs_once_across_tool_iterations(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_memory_hydration_runs_once_across_tool_iterations(tmp_path):
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.bus.events import InboundMessage
+    from nanobot.bus.queue import MessageBus
+    from nanobot.identity.principal import IDENTITY_METADATA_KEY, Principal
+    from nanobot.identity.runtime import TenantRuntimeStore
+    from nanobot.security.workspace_access import WORKSPACE_SCOPE_METADATA_KEY
+
+    runtime = TenantRuntimeStore(tmp_path / "tenants").for_principal(
+        Principal(user_id="u1", org_id="org1")
+    )
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    provider.generation = GenerationSettings()
+    provider.chat_with_retry = AsyncMock(side_effect=[
+        LLMResponse(
+            content="reading",
+            tool_calls=[ToolCallRequest(
+                id="call_list",
+                name="list_dir",
+                arguments={"path": "."},
+            )],
+            usage={},
+        ),
+        LLMResponse(content="done", usage={}),
+    ])
+
+    class FakeMemorySync:
+        def __init__(self):
+            self.calls = 0
+            self.commit_calls = 0
+
+        async def prepare_turn(self, **_kwargs):
+            self.calls += 1
+            return True
+
+        async def commit_changed_documents(self, _store):
+            self.commit_calls += 1
+            return True
+
+    memory_sync = FakeMemorySync()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path / "system",
+        model="test-model",
+        memory_sync=memory_sync,
+    )
+    loop.consolidator.maybe_consolidate_by_tokens = AsyncMock(return_value=None)
+    identity = runtime.identity_metadata()
+    session = loop.sessions.get_or_create("websocket:chat1")
+    session.metadata[IDENTITY_METADATA_KEY] = identity
+
+    await loop._process_message(InboundMessage(
+        channel="websocket",
+        sender_id="u1",
+        chat_id="chat1",
+        content="list files",
+        metadata={
+            IDENTITY_METADATA_KEY: runtime.principal.metadata(),
+            WORKSPACE_SCOPE_METADATA_KEY: runtime.workspace_scope().metadata(),
+        },
+    ))
+
+    assert provider.chat_with_retry.await_count == 2
+    assert memory_sync.calls == 1
+    assert memory_sync.commit_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_non_goal_direct_turn_cannot_reuse_prior_goal_command(tmp_path):
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus

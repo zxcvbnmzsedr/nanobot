@@ -58,6 +58,7 @@ from nanobot.webui.http_utils import (
     query_first as _query_first,
 )
 from nanobot.webui.mcp_presets_api import normalize_mcp_preset_mentions
+from nanobot.webui.memory_ws import webui_memory_event
 from nanobot.webui.transcription_ws import webui_transcription_event
 from nanobot.webui.websocket_logging import websockets_server_logger
 
@@ -80,6 +81,7 @@ class KangarooAuthConfig(Base):
     enabled: bool = False
     api_base: str = ""
     llm_proxy_url: str = ""
+    memory_api_url: str = ""
     user_info_path: str = "api/auth/userInfo"
     exchange_path: str = "/api/auth/exchange"
     login_path: str = "/api/auth/login"
@@ -112,15 +114,15 @@ class KangarooAuthConfig(Base):
             raise ValueError("runtime_root must be an absolute path")
         return str(path)
 
-    @field_validator("llm_proxy_url")
+    @field_validator("llm_proxy_url", "memory_api_url")
     @classmethod
-    def llm_proxy_url_format(cls, value: str) -> str:
+    def service_url_format(cls, value: str) -> str:
         value = value.strip()
         if not value:
             return ""
         parsed = urlparse(value)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("llm_proxy_url must be an absolute HTTP(S) URL")
+            raise ValueError("service URL must be an absolute HTTP(S) URL")
         return value
 
     @model_validator(mode="after")
@@ -129,6 +131,8 @@ class KangarooAuthConfig(Base):
             raise ValueError("kangaroo_auth.api_base is required when enabled")
         if self.enabled and not self.llm_proxy_url:
             raise ValueError("kangaroo_auth.llm_proxy_url is required when enabled")
+        if self.enabled and not self.memory_api_url:
+            raise ValueError("kangaroo_auth.memory_api_url is required when enabled")
         return self
 
 
@@ -371,6 +375,7 @@ class WebSocketChannel(BaseChannel):
         self._media = gateway.media
         self._transcripts = gateway.transcripts
         self._workspaces = gateway.workspaces
+        self._memory_client = gateway.memory_client
 
         self._stream_text_buffers: dict[tuple[str, str], list[str]] = {}
 
@@ -844,6 +849,14 @@ class WebSocketChannel(BaseChannel):
             return
         if t == "transcribe_audio":
             event, payload = await webui_transcription_event(envelope)
+            await self._send_event(connection, event, **payload)
+            return
+        if t in {"memory_get", "memory_update"}:
+            event, payload = await webui_memory_event(
+                envelope,
+                principal=self._conn_principals.get(connection),
+                memory_client=self._memory_client,
+            )
             await self._send_event(connection, event, **payload)
             return
         if t == "message":

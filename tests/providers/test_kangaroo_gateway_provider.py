@@ -292,6 +292,7 @@ def test_factory_forces_kangaroo_provider_without_api_key() -> None:
                     "enabled": True,
                     "apiBase": "https://accounts.example.com/",
                     "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+                    "memoryApiUrl": "https://agent.example.com/nanobot/memory",
                 },
             }
         }

@@ -233,6 +233,65 @@ async def test_dream_advances_cursor_when_diff_nonempty(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_dream_uses_invoking_user_store_and_forwards_identity(tmp_path) -> None:
+    msg = InboundMessage(
+        channel="websocket",
+        sender_id="u1",
+        chat_id="chat1",
+        content="/dream",
+        metadata={"nanobot_identity": {"source": "kangaroo", "user_scope": "scope1"}},
+    )
+    global_store = _FakeStore(_FakeGit(initialized=False), dream_prompt_result=None)
+    user_store = _FakeStore(
+        _FakeGit(initialized=False),
+        last_dream_cursor=5,
+        dream_prompt_result=("user dream prompt", 42),
+    )
+    calls = []
+
+    async def process_direct(*args, **kwargs):
+        calls.append((args, kwargs))
+        return OutboundMessage(
+            channel="websocket",
+            chat_id="chat1",
+            content="done",
+            metadata={"_stop_reason": "completed"},
+        )
+
+    class FakeSync:
+        async def commit_dream(self, store, cursor):
+            assert store is user_store
+            assert cursor == 42
+            return True
+
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    loop = SimpleNamespace(
+        bus=_FakeBus(),
+        context=SimpleNamespace(memory=global_store, timezone="UTC"),
+        sessions=SimpleNamespace(sessions_dir=sessions_dir),
+        process_direct=process_direct,
+        memory_sync=FakeSync(),
+        _memory_store_for_session_key=lambda _key: user_store,
+    )
+    ctx = CommandContext(
+        msg=msg,
+        session=SimpleNamespace(metadata=msg.metadata),
+        key="websocket:chat1",
+        raw="/dream",
+        loop=loop,
+    )
+
+    await cmd_dream(ctx)
+    await asyncio.sleep(0)
+
+    assert user_store._last_dream_cursor == 42
+    assert global_store._last_dream_cursor == 1
+    assert calls[0][1]["metadata"] == msg.metadata
+    assert calls[0][1]["channel"] == "websocket"
+
+
+@pytest.mark.asyncio
 async def test_dream_keeps_cursor_on_completed_noop(tmp_path) -> None:
     """Completed run with no file changes must NOT advance the cursor, so the
     history batch is reconsidered next run instead of silently swallowed."""

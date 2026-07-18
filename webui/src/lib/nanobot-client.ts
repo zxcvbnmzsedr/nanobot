@@ -6,6 +6,9 @@ import type {
   OutboundMcpPresetMention,
   OutboundMedia,
   GoalStateWsPayload,
+  ManagedMemoryUpdatePayload,
+  MemoryManagementPayload,
+  MemoryScopeType,
   WorkspaceScopePayload,
 } from "./types";
 import { createHostWebSocket } from "./runtime";
@@ -51,6 +54,10 @@ function wsInboundDebugEnabled(): boolean {
 /** Shorten streaming text fields so logging stays usable for huge deltas. */
 function summarizeInboundWsPayload(ev: InboundEvent): unknown {
   const kind = (ev as { event?: string }).event;
+  if (kind === "memory_result") {
+    const row = ev as Extract<InboundEvent, { event: "memory_result" }>;
+    return { event: row.event, request_id: row.request_id, payload: "[redacted]" };
+  }
   if (kind !== "delta" && kind !== "reasoning_delta") return ev;
   const row = { ...(ev as object) } as Record<string, unknown>;
   const text = typeof row.text === "string" ? row.text : "";
@@ -100,6 +107,22 @@ interface PendingTranscription {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface PendingMemoryRequest {
+  resolve: (payload: unknown) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+export class MemoryRequestError extends Error {
+  constructor(
+    public readonly status: number,
+    detail: string,
+  ) {
+    super(detail);
+    this.name = "MemoryRequestError";
+  }
+}
+
 export interface NanobotClientOptions {
   url: string;
   reconnect?: boolean;
@@ -138,6 +161,7 @@ export class NanobotClient {
   private goalStateByChatId = new Map<string, GoalStateWsPayload>();
   private pendingNewChat: PendingNewChat | null = null;
   private pendingTranscriptions = new Map<string, PendingTranscription>();
+  private pendingMemoryRequests = new Map<string, PendingMemoryRequest>();
   // Frames queued while the socket is not yet OPEN
   private sendQueue: Outbound[] = [];
   private reconnectAttempts = 0;
@@ -347,6 +371,31 @@ export class NanobotClient {
     });
   }
 
+  getMemory(timeoutMs: number = 20_000): Promise<MemoryManagementPayload> {
+    return this.requestMemory<MemoryManagementPayload>(
+      { type: "memory_get", request_id: crypto.randomUUID() },
+      timeoutMs,
+    );
+  }
+
+  updateMemory(
+    values: {
+      scopeType: MemoryScopeType;
+      content: string;
+      expectedVersion: number;
+    },
+    timeoutMs: number = 20_000,
+  ): Promise<ManagedMemoryUpdatePayload> {
+    return this.requestMemory<ManagedMemoryUpdatePayload>(
+      {
+        type: "memory_update",
+        request_id: crypto.randomUUID(),
+        ...values,
+      },
+      timeoutMs,
+    );
+  }
+
   /** Ask the server to create a non-destructive fork before a user-message index. */
   forkChat(
     sourceChatId: string,
@@ -492,6 +541,20 @@ export class NanobotClient {
       return;
     }
 
+    if (parsed.event === "memory_result") {
+      this.resolveMemoryRequest(parsed.request_id, parsed.payload);
+      return;
+    }
+
+    if (parsed.event === "memory_error") {
+      this.rejectMemoryRequest(
+        parsed.request_id,
+        parsed.status,
+        parsed.detail || "memory request failed",
+      );
+      return;
+    }
+
     if (parsed.event === "session_updated") {
       this.emitSessionUpdate(parsed.chat_id, parsed.scope, parsed.workspace_scope);
       return;
@@ -576,6 +639,7 @@ export class NanobotClient {
       this.pendingNewChat = null;
     }
     this.rejectAllTranscriptions("socket closed");
+    this.rejectAllMemoryRequests(503, "socket closed");
     // Surface structured reasons *before* reconnect logic so the UI can
     // display the error even while the client transparently reconnects.
     // Browsers populate ``CloseEvent.code`` with the wire-level close code;
@@ -629,6 +693,57 @@ export class NanobotClient {
       clearTimeout(pending.timer);
       pending.reject(new Error(detail));
       this.pendingTranscriptions.delete(requestId);
+    }
+  }
+
+  private requestMemory<T>(
+    frame: Extract<Outbound, { type: "memory_get" | "memory_update" }>,
+    timeoutMs: number,
+  ): Promise<T> {
+    const requestId = frame.request_id;
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingMemoryRequests.delete(requestId);
+        reject(new MemoryRequestError(504, "memory request timed out"));
+      }, timeoutMs);
+      this.pendingMemoryRequests.set(requestId, {
+        resolve: (payload) => resolve(payload as T),
+        reject,
+        timer,
+      });
+      this.queueSend(frame);
+    });
+  }
+
+  private resolveMemoryRequest(requestId: string, payload: unknown): void {
+    const pending = this.pendingMemoryRequests.get(requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingMemoryRequests.delete(requestId);
+    pending.resolve(payload);
+  }
+
+  private rejectMemoryRequest(
+    requestId: string | undefined,
+    status: number,
+    detail: string,
+  ): void {
+    if (!requestId) {
+      this.rejectAllMemoryRequests(status, detail);
+      return;
+    }
+    const pending = this.pendingMemoryRequests.get(requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingMemoryRequests.delete(requestId);
+    pending.reject(new MemoryRequestError(status, detail));
+  }
+
+  private rejectAllMemoryRequests(status: number, detail: string): void {
+    for (const [requestId, pending] of this.pendingMemoryRequests) {
+      clearTimeout(pending.timer);
+      pending.reject(new MemoryRequestError(status, detail));
+      this.pendingMemoryRequests.delete(requestId);
     }
   }
 

@@ -3,6 +3,7 @@ import {
   Archive,
   Brain,
   CalendarClock,
+  Database,
   Menu,
   Search,
   Settings,
@@ -35,11 +36,12 @@ interface SidebarProps {
   onRequestRenameProject: (projectKey: string, label: string) => void;
   onNewChatInProject: (projectPath: string, projectName: string) => void;
   onOpenSettings: () => void;
+  onOpenMemory: () => void;
   onOpenApps: () => void;
   onOpenSkills: () => void;
   onOpenAutomations: () => void;
   onOpenSearch: () => void;
-  activeUtility?: "apps" | "skills" | "automations" | null;
+  activeUtility?: "memory" | "apps" | "skills" | "automations" | null;
   onToggleArchived: () => void;
   onCollapse: () => void;
   onExpand?: () => void;
@@ -153,6 +155,13 @@ export function Sidebar(props: SidebarProps) {
           label={t("sidebar.searchAria")}
           onClick={props.onOpenSearch}
           icon={<Search className="h-4 w-4" />}
+        />
+        <SidebarActionButton
+          collapsed={collapsed}
+          label={t("sidebar.memory")}
+          onClick={props.onOpenMemory}
+          active={props.activeUtility === "memory"}
+          icon={<Database className="h-4 w-4" />}
         />
         <SidebarActionButton
           collapsed={collapsed}

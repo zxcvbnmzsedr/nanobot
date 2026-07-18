@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from loguru import logger as default_logger
 
+from nanobot.agent.memory_sync import KangarooMemoryClient
 from nanobot.config.paths import get_data_dir
 from nanobot.identity.credentials import get_kangaroo_credential_store
 from nanobot.identity.handoff import HandoffStore
@@ -37,6 +38,7 @@ class GatewayServices:
     handoffs: HandoffStore
     identity_verifier: KangarooIdentityVerifier | None
     tenant_runtimes: TenantRuntimeStore
+    memory_client: KangarooMemoryClient | None
 
 
 def build_gateway_services(
@@ -86,6 +88,15 @@ def build_gateway_services(
             refresher=identity_verifier.refresh,
             refresh_skew_s=auth_config.refresh_skew_s,
         )
+    memory_client = (
+        KangarooMemoryClient(
+            base_url=auth_config.memory_api_url,
+            credential_store=credential_store,
+            timeout_s=auth_config.request_timeout_s,
+        )
+        if auth_config.enabled and auth_config.memory_api_url
+        else None
+    )
     media = WebUIMediaGateway(
         workspace_path=workspace_path,
         logger=logger,
@@ -134,4 +145,5 @@ def build_gateway_services(
         handoffs=handoffs,
         identity_verifier=identity_verifier,
         tenant_runtimes=tenant_runtimes,
+        memory_client=memory_client,
     )

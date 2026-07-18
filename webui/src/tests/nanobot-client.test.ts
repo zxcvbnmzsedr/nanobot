@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { NanobotClient } from "@/lib/nanobot-client";
+import { MemoryRequestError, NanobotClient } from "@/lib/nanobot-client";
 
 /**
  * Minimal fake WebSocket implementing the subset NanobotClient touches.
@@ -491,6 +491,89 @@ describe("NanobotClient", () => {
     const dropped = client.transcribeAudio("data:audio/webm;base64,BBBB", { timeoutMs: 1_000 });
     lastSocket().close();
     await expect(dropped).rejects.toThrow("socket closed");
+  });
+
+  it("correlates memory reads and updates independently", async () => {
+    const client = new NanobotClient({
+      url: "ws://test",
+      reconnect: false,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    client.connect();
+    lastSocket().fakeOpen();
+
+    const listing = client.getMemory(1_000);
+    const getFrame = JSON.parse(lastSocket().sent.at(-1) as string);
+    const update = client.updateMemory({
+      scopeType: "user",
+      content: "updated",
+      expectedVersion: 1,
+    }, 1_000);
+    const updateFrame = JSON.parse(lastSocket().sent.at(-1) as string);
+
+    lastSocket().fakeMessage({
+      event: "memory_result",
+      request_id: updateFrame.request_id,
+      payload: {
+        document: { scopeType: "user", content: "updated", version: 2, canEdit: true },
+      },
+    });
+    lastSocket().fakeMessage({
+      event: "memory_result",
+      request_id: getFrame.request_id,
+      payload: { documents: [], userName: "Alice", orgName: "Acme" },
+    });
+
+    await expect(listing).resolves.toMatchObject({ userName: "Alice" });
+    await expect(update).resolves.toMatchObject({ document: { version: 2 } });
+    expect(getFrame).toMatchObject({ type: "memory_get" });
+    expect(updateFrame).toMatchObject({
+      type: "memory_update",
+      scopeType: "user",
+      content: "updated",
+      expectedVersion: 1,
+    });
+  });
+
+  it("rejects memory requests on server errors, timeout, and socket close", async () => {
+    const client = new NanobotClient({
+      url: "ws://test",
+      reconnect: false,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    client.connect();
+    lastSocket().fakeOpen();
+
+    const conflicted = client.updateMemory({
+      scopeType: "user",
+      content: "stale",
+      expectedVersion: 1,
+    }, 1_000);
+    const conflictFrame = JSON.parse(lastSocket().sent.at(-1) as string);
+    lastSocket().fakeMessage({
+      event: "memory_error",
+      request_id: conflictFrame.request_id,
+      status: 409,
+      detail: "conflict",
+    });
+    await expect(conflicted).rejects.toMatchObject<MemoryRequestError>({
+      status: 409,
+      message: "conflict",
+    });
+
+    const timedOut = client.getMemory(10);
+    const timedOutExpectation = expect(timedOut).rejects.toMatchObject<MemoryRequestError>({
+      status: 504,
+    });
+    await vi.advanceTimersByTimeAsync(11);
+    await timedOutExpectation;
+
+    const dropped = client.getMemory(1_000);
+    lastSocket().close();
+    await expect(dropped).rejects.toMatchObject<MemoryRequestError>({
+      status: 503,
+      message: "socket closed",
+    });
   });
 
   it("queues sends while connecting and flushes on open", () => {

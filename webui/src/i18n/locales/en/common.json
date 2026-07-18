@@ -64,6 +64,7 @@
     "noSearchResults": "No matching chats.",
     "recent": "Recent",
     "settings": "Settings",
+    "memory": "Memory",
     "language": {
       "label": "Language",
       "ariaLabel": "Change language"
@@ -72,6 +73,39 @@
     "automations": "Automations",
     "skills": {
       "title": "Skills"
+    }
+  },
+  "memory": {
+    "title": "Memory",
+    "scopePicker": "Memory scope",
+    "refresh": "Refresh memory",
+    "loading": "Loading memory...",
+    "version": "Version {{version}}",
+    "editorLabel": "{{scope}} editor",
+    "empty": "No memory has been saved for this scope.",
+    "readOnly": "Your account has read-only access.",
+    "save": "Save",
+    "saving": "Saving...",
+    "saved": "Saved",
+    "scopes": {
+      "system": {
+        "name": "System",
+        "description": "Shared across every organization and account."
+      },
+      "org": {
+        "name": "Organization",
+        "description": "Shared with every account in this organization."
+      },
+      "user": {
+        "name": "Personal",
+        "description": "Private to the current account."
+      }
+    },
+    "errors": {
+      "load": "Could not load memory.",
+      "save": "Could not save memory.",
+      "permission": "You cannot edit this memory scope.",
+      "conflict": "Memory changed elsewhere and was reloaded."
     }
   },
   "settings": {

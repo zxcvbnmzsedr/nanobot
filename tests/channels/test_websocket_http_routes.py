@@ -239,6 +239,7 @@ async def test_kangaroo_native_login_routes_into_identity_bootstrap(
             "enabled": True,
             "apiBase": "https://accounts.example.com/",
             "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+            "memoryApiUrl": "https://agent.example.com/nanobot/memory",
             "runtimeRoot": str(tmp_path / "tenants"),
         },
     )
@@ -2753,6 +2754,7 @@ def test_wildcard_host_with_kangaroo_auth_is_valid(bus: MagicMock, tmp_path: Pat
             "enabled": True,
             "apiBase": "https://accounts.example.com/",
             "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+            "memoryApiUrl": "https://agent.example.com/nanobot/memory",
             "runtimeRoot": str(tmp_path / "tenants"),
         },
     )
@@ -2782,6 +2784,7 @@ def test_bootstrap_ws_url_uses_forwarded_https_host(bus: MagicMock, tmp_path: Pa
             "enabled": True,
             "apiBase": "https://accounts.example.com/",
             "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+            "memoryApiUrl": "https://agent.example.com/nanobot/memory",
             "runtimeRoot": str(tmp_path / "tenants"),
         },
     )

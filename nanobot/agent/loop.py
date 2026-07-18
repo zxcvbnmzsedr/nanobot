@@ -285,6 +285,7 @@ class AgentLoop:
         runtime_model_publisher: Callable[[str, str | None], None] | None = None,
         restart_mode: str = "auto",
         local_trigger_store: Any | None = None,
+        memory_sync: Any | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
 
@@ -351,6 +352,7 @@ class AgentLoop:
         self._hook_factories: list[AgentTurnHookFactory] = hook_factories or []
 
         self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills)
+        self.memory_sync = memory_sync
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         # One file-read/write tracker per logical session. The tool registry is
@@ -439,6 +441,74 @@ class AgentLoop:
         )
         return self.context.memory_for_workspace(scope.project_path)
 
+    async def _prepare_memory_for_message(
+        self,
+        msg: InboundMessage,
+        session: Session,
+    ) -> bool | None:
+        if self.memory_sync is None:
+            return None
+        from nanobot.agent.memory_sync import MemorySyncCoordinator
+
+        identity = MemorySyncCoordinator.identity_from(msg.metadata, session.metadata)
+        if identity is None:
+            return None
+        scope = self.workspace_scopes.for_message(msg, session.metadata)
+        return await self.memory_sync.prepare_turn(
+            identity=identity,
+            system_store=self.context.memory,
+            user_store=self.context.memory_for_workspace(scope.project_path),
+        )
+
+    @staticmethod
+    def _request_metadata(msg: InboundMessage, session: Session) -> dict[str, Any]:
+        metadata = dict(msg.metadata or {})
+        if IDENTITY_METADATA_KEY not in metadata:
+            identity = session.metadata.get(IDENTITY_METADATA_KEY)
+            if isinstance(identity, Mapping):
+                metadata[IDENTITY_METADATA_KEY] = dict(identity)
+        return metadata
+
+    async def _consolidate_with_request_context(
+        self,
+        session: Session,
+        *,
+        runtime: LLMRuntime,
+        replay_max_messages: int,
+        request_context: RequestContext,
+    ) -> None:
+        token = bind_request_context(request_context)
+        try:
+            await self.consolidator.maybe_consolidate_by_tokens(
+                session,
+                runtime=runtime,
+                replay_max_messages=replay_max_messages,
+            )
+        finally:
+            reset_request_context(token)
+
+    def _background_consolidation(
+        self,
+        session: Session,
+        *,
+        runtime: LLMRuntime,
+        replay_max_messages: int,
+        request_context: RequestContext,
+    ) -> Awaitable[None]:
+        identity = request_context.metadata.get(IDENTITY_METADATA_KEY)
+        if isinstance(identity, Mapping) and identity.get("source") == "kangaroo":
+            return self._consolidate_with_request_context(
+                session,
+                runtime=runtime,
+                replay_max_messages=replay_max_messages,
+                request_context=request_context,
+            )
+        return self.consolidator.maybe_consolidate_by_tokens(
+            session,
+            runtime=runtime,
+            replay_max_messages=replay_max_messages,
+        )
+
     @classmethod
     def from_config(
         cls,
@@ -462,6 +532,17 @@ class AgentLoop:
         model = extra.pop("model", None) or resolved.model
         context_window_tokens = extra.pop("context_window_tokens", None) or resolved.context_window_tokens
         provider_snapshot_loader = extra.pop("provider_snapshot_loader", None)
+        memory_sync = extra.pop("memory_sync", None)
+        if memory_sync is None:
+            from nanobot.providers.factory import resolve_kangaroo_auth_config
+
+            if auth_config := resolve_kangaroo_auth_config(config):
+                from nanobot.agent.memory_sync import KangarooMemoryClient, MemorySyncCoordinator
+
+                memory_sync = MemorySyncCoordinator(KangarooMemoryClient(
+                    base_url=auth_config.memory_api_url,
+                    timeout_s=auth_config.request_timeout_s,
+                ))
         preset_snapshot_loader = extra.pop("preset_snapshot_loader", None) or preset_helpers.make_preset_snapshot_loader(
             config,
             provider_snapshot_loader,
@@ -493,6 +574,7 @@ class AgentLoop:
             restart_mode=config.gateway.restart_mode,
             provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,
+            memory_sync=memory_sync,
             **extra,
         )
 
@@ -707,7 +789,7 @@ class AgentLoop:
             session_key=ctx.session_key,
             original_user_text=ctx.original_user_text,
             runtime=ctx.runtime,
-            metadata=dict(ctx.msg.metadata or {}),
+            metadata=self._request_metadata(ctx.msg, ctx.session),
             sender_id=ctx.msg.sender_id,
             turn_id=ctx.turn_id,
             workspace=scope.project_path,
@@ -1295,12 +1377,25 @@ class AgentLoop:
         if pending:
             logger.info("Memory compact triggered for session {}", key)
 
-        await self.consolidator.maybe_consolidate_by_tokens(
+        await self._prepare_memory_for_message(msg, session)
+        request_ctx = RequestContext(
+            channel=channel,
+            chat_id=chat_id,
+            message_id=msg.metadata.get("message_id"),
+            session_key=key,
+            original_user_text=None,
+            runtime=runtime,
+            metadata=self._request_metadata(msg, session),
+            sender_id=msg.sender_id,
+            workspace=self.workspace_scopes.for_message(msg, session.metadata).project_path,
+        )
+        await self._consolidate_with_request_context(
             session,
             runtime=runtime,
             replay_max_messages=replay_max_messages_for_context(
                 runtime.context_window_tokens
             ),
+            request_context=request_ctx,
         )
         is_subagent = msg.sender_id == "subagent"
         if is_subagent and self._persist_subagent_followup(session, msg):
@@ -1338,6 +1433,7 @@ class AgentLoop:
             original_user_text=None,
             pending_queue=pending_queue,
             hook_factories=hook_factories,
+            request_context=request_ctx,
         )
         wall_done = time.time()
         latency_ms = max(0, int((wall_done - t_wall) * 1000))
@@ -1349,12 +1445,13 @@ class AgentLoop:
         self._clear_runtime_checkpoint(session)
         self.sessions.save(session)
         self._schedule_background(
-            self.consolidator.maybe_consolidate_by_tokens(
+            self._background_consolidation(
                 session,
                 runtime=runtime,
                 replay_max_messages=replay_max_messages_for_context(
                     runtime.context_window_tokens
                 ),
+                request_context=request_ctx,
             )
         )
         content = final_content or "Background task completed."
@@ -1603,11 +1700,14 @@ class AgentLoop:
         replay_max_messages = replay_max_messages_for_context(
             ctx.runtime.context_window_tokens
         )
+        ctx.request_context = self._request_context_for_turn(ctx)
         if not ctx.ephemeral:
-            await self.consolidator.maybe_consolidate_by_tokens(
+            await self._prepare_memory_for_message(ctx.msg, ctx.session)
+            await self._consolidate_with_request_context(
                 ctx.session,
                 runtime=ctx.runtime,
                 replay_max_messages=replay_max_messages,
+                request_context=ctx.request_context,
             )
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
@@ -1624,7 +1724,6 @@ class AgentLoop:
             ctx.runtime,
         )
 
-        ctx.request_context = self._request_context_for_turn(ctx)
         ctx.runtime_context_blocks = await self._resolve_runtime_context_for_turn(ctx)
         ctx.initial_messages = self._build_initial_messages(
             ctx.msg,
@@ -1713,6 +1812,10 @@ class AgentLoop:
             ctx.turn_latency_ms,
         )
         if not ctx.ephemeral:
+            if self.memory_sync is not None:
+                await self.memory_sync.commit_changed_documents(
+                    self._memory_store_for_session_key(ctx.session_key)
+                )
             ctx.session.enforce_file_cap(
                 on_archive=partial(
                     self._memory_store_for_session_key(ctx.session_key).raw_archive,
@@ -1720,12 +1823,13 @@ class AgentLoop:
                 )
             )
             self._schedule_background(
-                self.consolidator.maybe_consolidate_by_tokens(
+                self._background_consolidation(
                     ctx.session,
                     runtime=ctx.runtime,
                     replay_max_messages=replay_max_messages_for_context(
                         ctx.runtime.context_window_tokens
                     ),
+                    request_context=ctx.request_context,
                 )
             )
         self._clear_pending_user_turn(ctx.session)
@@ -1995,15 +2099,16 @@ class AgentLoop:
         tools: ToolRegistry | None = None,
         persist_user_message: bool = True,
         runtime: LLMRuntime | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> OutboundMessage | None:
         """Process a message directly and return the outbound payload."""
         await self._connect_mcp()
-        metadata: dict[str, Any] = {}
+        message_metadata = dict(metadata or {})
         if not persist_user_message:
-            metadata[turn_continuation.SKIP_USER_PERSIST_META] = True
+            message_metadata[turn_continuation.SKIP_USER_PERSIST_META] = True
         msg = InboundMessage(
             channel=channel, sender_id=sender_id, chat_id=chat_id,
-            content=content, media=media or [], metadata=metadata,
+            content=content, media=media or [], metadata=message_metadata,
         )
         # Share the dispatch lock so direct calls serialize with bus turns.
         lock = self._session_locks.setdefault(session_key, asyncio.Lock())

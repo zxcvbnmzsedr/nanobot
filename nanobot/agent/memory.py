@@ -7,6 +7,7 @@ import json
 import os
 import re
 import threading
+import uuid
 import weakref
 from contextlib import suppress
 from datetime import datetime
@@ -73,6 +74,7 @@ class MemoryStore:
         self._oversize_logged = False  # rate-limit oversized-entry warning
         self._dream_prompt_oversize_logged = False
         self._append_lock = threading.Lock()  # serialize cursor allocation + append
+        self._history_append_listener: Callable[[dict[str, Any]], None] | None = None
         self._git = GitStore(workspace, tracked_files=[
             "SOUL.md", "USER.md", "memory/MEMORY.md", "memory/.dream_cursor",
         ])
@@ -81,6 +83,14 @@ class MemoryStore:
     @property
     def git(self) -> GitStore:
         return self._git
+
+    def set_history_append_listener(
+        self,
+        listener: Callable[[dict[str, Any]], None] | None,
+    ) -> None:
+        """Observe durable history appends without changing local persistence semantics."""
+
+        self._history_append_listener = listener
 
     # -- generic helpers -----------------------------------------------------
 
@@ -289,13 +299,53 @@ class MemoryStore:
                     "persisting empty content to avoid re-polluting context",
                     cursor,
                 )
-            record = {"cursor": cursor, "timestamp": ts, "content": content}
+            record = {
+                "cursor": cursor,
+                "event_id": uuid.uuid4().hex,
+                "timestamp": ts,
+                "content": content,
+            }
             if session_key:
                 record["session_key"] = session_key
             with open(self.history_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
             self._cursor_file.write_text(str(cursor), encoding="utf-8")
+        if self._history_append_listener is not None:
+            try:
+                self._history_append_listener(dict(record))
+            except Exception:
+                logger.exception("History append listener failed after local persistence")
         return cursor
+
+    def read_history(self) -> list[dict[str, Any]]:
+        """Return valid history records in cursor order."""
+
+        return [entry for entry, _ in self._iter_valid_entries()]
+
+    def replace_history_snapshot(
+        self,
+        entries: list[dict[str, Any]],
+        *,
+        latest_cursor: int,
+        dream_cursor: int,
+    ) -> None:
+        """Atomically replace the local mirror with a backend-authoritative snapshot."""
+
+        valid_entries = []
+        for entry in entries:
+            cursor = self._valid_cursor(entry.get("cursor"))
+            if cursor is None or cursor == 0 or not self._valid_history_payload(entry):
+                raise ValueError("remote history snapshot contains a malformed entry")
+            valid_entries.append(dict(entry))
+        valid_entries.sort(key=lambda item: item["cursor"])
+        if valid_entries and valid_entries[-1]["cursor"] > latest_cursor:
+            raise ValueError("remote history cursor exceeds latest cursor")
+        if dream_cursor > latest_cursor:
+            raise ValueError("remote dream cursor exceeds latest cursor")
+        with self._append_lock:
+            self._write_entries(valid_entries)
+            self._cursor_file.write_text(str(latest_cursor), encoding="utf-8")
+            self._dream_cursor_file.write_text(str(dream_cursor), encoding="utf-8")
 
     @staticmethod
     def _valid_cursor(value: Any) -> int | None:
@@ -678,9 +728,11 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def dream_session_key() -> str:
-        """Return a unique session key for a Dream run, e.g. ``dream:20260528-100000``."""
-        return f"dream:{datetime.now():%Y%m%d-%H%M%S}"
+    def dream_session_key(scope_suffix: str | None = None) -> str:
+        """Return a timestamped Dream key, optionally isolated by account scope."""
+
+        key = f"dream:{datetime.now():%Y%m%d-%H%M%S}"
+        return f"{key}:{scope_suffix[:24]}" if scope_suffix else key
 
     @staticmethod
     def build_dream_commit_message(prefix: str, diff_body: str) -> str:

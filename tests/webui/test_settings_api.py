@@ -91,6 +91,7 @@ def test_settings_payload_marks_kangaroo_model_as_server_managed(
                     "enabled": True,
                     "apiBase": "https://accounts.example.com",
                     "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+                    "memoryApiUrl": "https://agent.example.com/nanobot/memory",
                 },
             },
         },

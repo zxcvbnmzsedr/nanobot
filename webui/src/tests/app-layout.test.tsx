@@ -12,6 +12,8 @@ const getSessionAutomationsSpy = vi.fn<(key: string) => Promise<SessionAutomatio
 const toggleThemeSpy = vi.fn();
 const updateUrlSpy = vi.fn();
 const attachSpy = vi.fn();
+const getMemorySpy = vi.fn();
+const updateMemorySpy = vi.fn();
 const runStatusHandlers = new Set<(chatId: string, startedAt: number | null) => void>();
 const sessionUpdateHandlers = new Set<(chatId: string, scope?: string) => void>();
 let mockSessions: ChatSummary[] = [];
@@ -219,9 +221,17 @@ vi.mock("@/lib/nanobot-client", () => {
     attach = attachSpy;
     close = vi.fn();
     updateUrl = updateUrlSpy;
+    getMemory = getMemorySpy;
+    updateMemory = updateMemorySpy;
   }
 
-  return { NanobotClient: MockClient };
+  class MemoryRequestError extends Error {
+    constructor(public readonly status: number, detail: string) {
+      super(detail);
+    }
+  }
+
+  return { MemoryRequestError, NanobotClient: MockClient };
 });
 
 import {
@@ -247,6 +257,12 @@ describe("App layout", () => {
     getSessionAutomationsSpy.mockReset().mockResolvedValue([]);
     toggleThemeSpy.mockReset();
     attachSpy.mockReset();
+    getMemorySpy.mockReset().mockResolvedValue({
+      userName: "",
+      orgName: "",
+      documents: [],
+    });
+    updateMemorySpy.mockReset();
     runStatusHandlers.clear();
     sessionUpdateHandlers.clear();
     window.history.replaceState(null, "", "/");
@@ -368,6 +384,30 @@ describe("App layout", () => {
       skillsButton.compareDocumentPosition(automationsButton) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+
+  it("opens the identity-bound memory manager from the main sidebar", async () => {
+    getMemorySpy.mockResolvedValue({
+      userName: "Alice",
+      orgName: "Acme",
+      documents: [
+        { scopeType: "system", content: "", version: 0, canEdit: false },
+        { scopeType: "org", content: "shared", version: 1, canEdit: false },
+        { scopeType: "user", content: "private", version: 2, canEdit: true },
+      ],
+    });
+    mockFetchRoutes({
+      "/api/settings": baseSettingsPayload(),
+    });
+    render(<App />);
+
+    await waitFor(() => expect(connectSpy).toHaveBeenCalled());
+    const sidebar = screen.getByRole("navigation", { name: "Sidebar navigation" });
+    fireEvent.click(within(sidebar).getByRole("button", { name: "Memory" }));
+
+    expect(await screen.findByRole("heading", { name: "Memory" })).toBeInTheDocument();
+    expect(window.location.hash).toBe("#/memory");
+    expect(screen.getByRole("textbox", { name: "Personal editor" })).toHaveValue("private");
   });
 
   it("restores the Settings route after a restart fallback hash", async () => {

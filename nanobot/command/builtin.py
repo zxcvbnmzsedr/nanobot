@@ -379,6 +379,16 @@ async def cmd_model(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+def _dream_store(ctx: CommandContext):
+    resolver = getattr(ctx.loop, "_memory_store_for_session_key", None)
+    if callable(resolver):
+        return resolver(ctx.key)
+    consolidator = getattr(ctx.loop, "consolidator", None)
+    if consolidator is not None and hasattr(consolidator, "store"):
+        return consolidator.store
+    return ctx.loop.context.memory
+
+
 async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
     """Manually trigger a Dream consolidation run."""
     import time
@@ -396,10 +406,19 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
         build_dream_commit_message = MemoryStore.build_dream_commit_message
         prune_dream_sessions = MemoryStore.prune_dream_sessions
 
-        store = loop.context.memory
+        prepare_memory = getattr(loop, "_prepare_memory_for_message", None)
+        if callable(prepare_memory) and ctx.session is not None:
+            await prepare_memory(msg, ctx.session)
+        store = _dream_store(ctx)
         content = ""
         resp = None
         diff_body = ""
+        commit_allowed = False
+        memory_sync = getattr(loop, "memory_sync", None)
+        lock_factory = getattr(memory_sync, "lock_for_store", None)
+        sync_lock = lock_factory(store) if callable(lock_factory) else None
+        if sync_lock is not None:
+            await sync_lock.acquire()
         t0 = time.monotonic()
         try:
             result = store.build_dream_prompt()
@@ -411,13 +430,20 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
                 ))
                 return
             prompt, last_cursor = result
-            key = dream_session_key()
+            binding_for_store = getattr(memory_sync, "binding_for_store", None)
+            binding = binding_for_store(store) if callable(binding_for_store) else None
+            key = dream_session_key(
+                str(binding.identity["user_scope"]) if binding is not None else None
+            )
             resp = await loop.process_direct(
                 prompt,
                 session_key=key,
                 ephemeral=True,
                 tools=store.build_dream_tools(),
                 on_progress=_silent,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                metadata=msg.metadata,
             )
             elapsed = time.monotonic() - t0
             # Ground truth: the real file delta, not the LLM's self-report.
@@ -427,8 +453,20 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
                 and MemoryStore.dream_run_completed(resp)
             )
             if productive:
-                store.set_last_dream_cursor(last_cursor)
-                content = f"Dream completed in {elapsed:.1f}s."
+                remote_committed = (
+                    await memory_sync.commit_dream(store, last_cursor)
+                    if memory_sync is not None
+                    else True
+                )
+                if remote_committed:
+                    store.set_last_dream_cursor(last_cursor)
+                    commit_allowed = True
+                    content = f"Dream completed in {elapsed:.1f}s."
+                else:
+                    content = (
+                        f"Dream produced changes in {elapsed:.1f}s, but backend memory "
+                        "was not committed; the cursor was not advanced."
+                    )
             elif MemoryStore.dream_run_completed(resp):
                 content = f"Dream completed in {elapsed:.1f}s; no memory changes."
             else:
@@ -447,13 +485,15 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
                 source="dream",
                 timezone_name=getattr(loop.context, "timezone", None),
             )
-            if store.git.is_initialized():
+            if commit_allowed and store.git.is_initialized():
                 commit_msg = build_dream_commit_message("dream: manual run", diff_body)
                 sha = store.git.auto_commit(commit_msg)
                 if sha:
                     content += f" (commit {sha})"
             store.compact_history()
             prune_dream_sessions(loop.sessions.sessions_dir)
+            if sync_lock is not None:
+                sync_lock.release()
         await loop.bus.publish_outbound(OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=content,
         ))
@@ -466,7 +506,7 @@ async def cmd_dream(ctx: CommandContext) -> OutboundMessage:
 
 async def cmd_dream_prompt(ctx: CommandContext) -> OutboundMessage:
     """Show or set up the workspace Dream memory instructions."""
-    store = ctx.loop.context.memory
+    store = _dream_store(ctx)
     path = store.dream_prompt_file
     display_path = path.relative_to(store.workspace).as_posix()
     args = ctx.args.strip().lower()
@@ -614,7 +654,7 @@ async def cmd_dream_log(ctx: CommandContext) -> OutboundMessage:
     Default: diff of the latest Dream commit versus its parent.
     With /dream-log <sha>: diff of that specific commit.
     """
-    store = ctx.loop.consolidator.store
+    store = _dream_store(ctx)
     git = store.git
 
     if not git.is_initialized():
@@ -678,7 +718,10 @@ async def cmd_dream_restore(ctx: CommandContext) -> OutboundMessage:
         /dream-restore          — list recent commits
         /dream-restore <sha>    — revert a specific commit
     """
-    store = ctx.loop.consolidator.store
+    prepare_memory = getattr(ctx.loop, "_prepare_memory_for_message", None)
+    if callable(prepare_memory) and ctx.session is not None:
+        await prepare_memory(ctx.msg, ctx.session)
+    store = _dream_store(ctx)
     git = store.git
     if not git.is_initialized():
         return OutboundMessage(
@@ -707,12 +750,27 @@ async def cmd_dream_restore(ctx: CommandContext) -> OutboundMessage:
             changed_files = _format_changed_files(result[1])
             new_sha = git.revert(sha, message_prefix=_DREAM_COMMIT_PREFIX)
             if new_sha:
-                content = (
-                    f"Restored Dream memory to the state before `{sha}`.\n\n"
-                    f"- New safety commit: `{new_sha}`\n"
-                    f"- Restored files: {changed_files}\n\n"
-                    f"Use `/dream-log {new_sha}` to inspect the restore diff."
+                memory_sync = getattr(ctx.loop, "memory_sync", None)
+                remote_committed = (
+                    await memory_sync.commit_dream(
+                        store,
+                        store.get_last_dream_cursor(),
+                    )
+                    if memory_sync is not None
+                    else True
                 )
+                if remote_committed:
+                    content = (
+                        f"Restored Dream memory to the state before `{sha}`.\n\n"
+                        f"- New safety commit: `{new_sha}`\n"
+                        f"- Restored files: {changed_files}\n\n"
+                        f"Use `/dream-log {new_sha}` to inspect the restore diff."
+                    )
+                else:
+                    content = (
+                        "The local restore completed, but backend memory rejected the "
+                        "update and the authoritative mirror was reloaded."
+                    )
             else:
                 content = (
                     f"Couldn't restore Dream change `{sha}`.\n\n"
