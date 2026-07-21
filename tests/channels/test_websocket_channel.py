@@ -111,15 +111,46 @@ async def test_stop_treats_cancelled_server_task_as_shutdown() -> None:
         await asyncio.Event().wait()
 
     task = asyncio.create_task(_server_task())
+    credential_task = asyncio.create_task(_server_task())
     await asyncio.sleep(0)
     task.cancel()
     await asyncio.sleep(0)
     channel._server_task = task
+    channel._credential_refresh_task = credential_task
 
     await channel.stop()
 
     assert channel._server_task is None
+    assert channel._credential_refresh_task is None
     assert task.cancelled()
+    assert credential_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_credential_refresh_loop_checks_immediately_and_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = _ch(MessageBus())
+    channel._running = True
+    channel._stop_event = asyncio.Event()
+    calls = 0
+
+    async def refresh_instance_if_due() -> str:
+        nonlocal calls
+        calls += 1
+        assert channel._stop_event is not None
+        channel._stop_event.set()
+        return "access-token"
+
+    monkeypatch.setattr(
+        channel.gateway.credential_store,
+        "refresh_instance_if_due",
+        refresh_instance_if_due,
+    )
+
+    await channel._credential_refresh_loop()
+
+    assert calls == 1
 
 
 @pytest.fixture()

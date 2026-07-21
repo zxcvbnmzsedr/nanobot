@@ -267,6 +267,7 @@ async def test_native_login_returns_identity_handoff_without_upstream_tokens(
     )
     api_token = json.loads(bootstrap.body)["api_token"]
     logout = gateway.http._handle_kangaroo_logout(
+        RemoteConnection(),
         Request(
             "/api/auth/logout",
             Headers({"Authorization": f"Bearer {api_token}"}),
@@ -342,7 +343,7 @@ async def test_only_bound_institution_account_can_access_gateway_settings(
     credential_store.clear()
 
 
-def test_kangaroo_mode_disables_localhost_bootstrap_bypass(tmp_path: Path) -> None:
+def test_kangaroo_mode_requires_login_without_a_stored_identity(tmp_path: Path) -> None:
     config = WebSocketConfig.model_validate({
         "kangarooAuth": {
             "enabled": True,
@@ -374,3 +375,125 @@ def test_kangaroo_mode_disables_localhost_bootstrap_bypass(tmp_path: Path) -> No
 
     assert response.status_code == 401
     assert json.loads(response.body)["auth_mode"] == "kangaroo"
+
+
+def test_local_bootstrap_reissues_transport_tokens_from_stored_identity(tmp_path: Path) -> None:
+    config = WebSocketConfig.model_validate({
+        "kangarooAuth": {
+            "enabled": True,
+            "apiBase": "https://accounts.example.com/",
+            "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+            "memoryApiUrl": "https://agent.example.com/nanobot/memory",
+            "runtimeRoot": str(tmp_path / "tenants"),
+        },
+    })
+    gateway = build_gateway_services(
+        config=config,
+        bus=MessageBus(),
+        session_manager=None,
+        static_dist_path=None,
+        workspace_path=tmp_path / "system",
+        default_restrict_to_workspace=False,
+        runtime_model_name=None,
+        runtime_surface="browser",
+        runtime_capabilities_overrides=None,
+    )
+    principal = _principal()
+    credential_store = get_kangaroo_credential_store()
+    credential_store.clear()
+    credential_store.put_instance(principal, "kangaroo-access")
+    expired_api_token = gateway.tokens.issue_api_token(-1, principal)
+
+    class LocalConnection:
+        remote_address = ("127.0.0.1", 1234)
+
+    class RemoteConnection:
+        remote_address = ("203.0.113.10", 1234)
+
+    try:
+        local = gateway.http._handle_bootstrap(
+            LocalConnection(),
+            Request(
+                "/webui/bootstrap",
+                Headers({
+                    "Host": "127.0.0.1:8765",
+                    "Authorization": f"Bearer {expired_api_token}",
+                }),
+            ),
+        )
+        local_body = json.loads(local.body)
+
+        assert local.status_code == 200
+        assert local_body["api_token"].startswith("nbwt_")
+        assert local_body["identity"]["userId"] == principal.user_id
+        assert gateway.tokens.principal_for_api_request(Request(
+            "/api/sessions",
+            Headers({"Authorization": f"Bearer {local_body['api_token']}"}),
+        )) == principal
+
+        remote = gateway.http._handle_bootstrap(
+            RemoteConnection(),
+            Request(
+                "/webui/bootstrap",
+                Headers({
+                    "Host": "nanobot.example.com",
+                    "Authorization": f"Bearer {expired_api_token}",
+                }),
+            ),
+        )
+        assert remote.status_code == 401
+    finally:
+        credential_store.clear()
+
+
+def test_local_logout_with_expired_transport_token_clears_stored_identity(
+    tmp_path: Path,
+) -> None:
+    config = WebSocketConfig.model_validate({
+        "kangarooAuth": {
+            "enabled": True,
+            "apiBase": "https://accounts.example.com/",
+            "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+            "memoryApiUrl": "https://agent.example.com/nanobot/memory",
+            "runtimeRoot": str(tmp_path / "tenants"),
+        },
+    })
+    gateway = build_gateway_services(
+        config=config,
+        bus=MessageBus(),
+        session_manager=None,
+        static_dist_path=None,
+        workspace_path=tmp_path / "system",
+        default_restrict_to_workspace=False,
+        runtime_model_name=None,
+        runtime_surface="browser",
+        runtime_capabilities_overrides=None,
+    )
+    principal = _principal()
+    credential_store = get_kangaroo_credential_store()
+    credential_store.clear()
+    credential_store.put_instance(principal, "kangaroo-access")
+    active_api_token = gateway.tokens.issue_api_token(300, principal)
+    expired_api_token = gateway.tokens.issue_api_token(-1, principal)
+
+    class LocalConnection:
+        remote_address = ("127.0.0.1", 1234)
+
+    response = gateway.http._handle_kangaroo_logout(
+        LocalConnection(),
+        Request(
+            "/api/auth/logout",
+            Headers({
+                "Host": "127.0.0.1:8765",
+                "Authorization": f"Bearer {expired_api_token}",
+            }),
+        ),
+    )
+
+    assert response.status_code == 200
+    assert credential_store.instance_principal() is None
+    assert credential_store.get(principal.user_scope) is None
+    assert gateway.tokens.principal_for_api_request(Request(
+        "/api/sessions",
+        Headers({"Authorization": f"Bearer {active_api_token}"}),
+    )) is None

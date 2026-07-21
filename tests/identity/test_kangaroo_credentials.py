@@ -152,6 +152,67 @@ async def test_proactive_refresh_is_singleflight_for_concurrent_requests() -> No
 
 
 @pytest.mark.asyncio
+async def test_instance_refreshes_when_refresh_token_is_near_expiry_and_persists_rotation(
+    tmp_path: Path,
+) -> None:
+    now = 100.0
+    calls = 0
+
+    async def refresh(refresh_token: str) -> KangarooTokenBundle:
+        nonlocal calls
+        calls += 1
+        assert refresh_token == "old-refresh"
+        return KangarooTokenBundle(
+            access_token="new-access",
+            refresh_token="new-refresh",
+            expires_at=1_000,
+            refresh_expires_at=2_000,
+        )
+
+    principal = _principal("instance-user")
+    vault_path = tmp_path / "auth" / "credentials.enc"
+    store = KangarooCredentialStore(
+        clock=lambda: now,
+        refresh_skew_s=20,
+        persistence_path=vault_path,
+        refresher=refresh,
+    )
+    store.put_instance_identity(AuthenticatedKangarooIdentity(
+        principal=principal,
+        access_token="old-access",
+        refresh_token="old-refresh",
+        expires_at=900,
+        refresh_expires_at=110,
+    ))
+
+    token = await store.refresh_instance_if_due()
+
+    assert token == "new-access"
+    assert calls == 1
+    restored = KangarooCredentialStore(clock=lambda: now, persistence_path=vault_path)
+    assert restored.instance_principal() == principal
+    assert restored.get(principal.user_scope) == "new-access"
+
+
+def test_instance_binding_drops_only_when_access_and_refresh_are_unusable() -> None:
+    now = 100.0
+    principal = _principal("instance-user")
+    store = KangarooCredentialStore(clock=lambda: now)
+    store.put_instance_identity(AuthenticatedKangarooIdentity(
+        principal=principal,
+        access_token="old-access",
+        expires_at=110,
+    ))
+
+    assert store.instance_principal() == principal
+
+    now = 111.0
+    assert store.instance_identity_metadata() is None
+    assert store.instance_principal() is None
+    assert store.get(principal.user_scope) is None
+
+
+@pytest.mark.asyncio
 async def test_401_refresh_preserves_a_token_rotated_by_another_request() -> None:
     calls = 0
 
@@ -193,6 +254,24 @@ async def test_transient_refresh_failure_keeps_persisted_credentials() -> None:
 
     with pytest.raises(KangarooIdentityError, match="temporarily unavailable"):
         await store.get_valid_access_token(principal.user_scope)
+
+    assert store.get(principal.user_scope) == "old-access"
+
+
+@pytest.mark.asyncio
+async def test_non_auth_refresh_rejection_keeps_persisted_credentials() -> None:
+    async def refresh(_: str) -> KangarooTokenBundle:
+        raise KangarooIdentityError("rate limited", http_status=429)
+
+    principal = _principal("user-1")
+    store = KangarooCredentialStore(refresher=refresh)
+    store.put(principal, "old-access", refresh_token="old-refresh")
+
+    with pytest.raises(KangarooIdentityError, match="rate limited"):
+        await store.refresh_access_token(
+            principal.user_scope,
+            rejected_access_token="old-access",
+        )
 
     assert store.get(principal.user_scope) == "old-access"
 

@@ -33,6 +33,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
+from nanobot.identity.kangaroo import KangarooIdentityError
 from nanobot.identity.principal import IDENTITY_METADATA_KEY, Principal
 from nanobot.identity.runtime import TenantRuntime
 from nanobot.security.workspace_access import (
@@ -64,6 +65,7 @@ from nanobot.webui.websocket_logging import websockets_server_logger
 
 # Plain HTTP WebUI routes also run through websockets.process_request.
 _WEBUI_HTTP_OPEN_TIMEOUT_S = 360.0
+_KANGAROO_CREDENTIAL_REFRESH_INTERVAL_S = 60.0
 _ACCOUNT_BLOCKED_COMMANDS = {
     "/dream",
     "/dream-log",
@@ -90,7 +92,7 @@ class KangarooAuthConfig(Base):
     upstream_refresh_path: str = "api/auth/oauth/token"
     handoff_ttl_s: int = Field(default=60, ge=10, le=600)
     request_timeout_s: float = Field(default=10.0, ge=1.0, le=30.0)
-    refresh_skew_s: int = Field(default=3600, ge=30, le=21_600)
+    refresh_skew_s: int = Field(default=300, ge=30, le=21_600)
     allowed_user_ids: list[str] = Field(default_factory=list)
     runtime_root: str = ""
 
@@ -368,6 +370,7 @@ class WebSocketChannel(BaseChannel):
         self._conn_principals: dict[Any, Principal] = {}
         self._stop_event: asyncio.Event | None = None
         self._server_task: asyncio.Task[None] | None = None
+        self._credential_refresh_task: asyncio.Task[None] | None = None
 
         self.gateway = gateway
         self._http_router = gateway.http
@@ -537,6 +540,44 @@ class WebSocketChannel(BaseChannel):
 
     # -- Server lifecycle and connection ingress ---------------------------
 
+    async def _credential_refresh_loop(self) -> None:
+        while self._running:
+            try:
+                await self.gateway.credential_store.refresh_instance_if_due()
+            except asyncio.CancelledError:
+                raise
+            except KangarooIdentityError as exc:
+                self.logger.warning(
+                    "Kangaroo instance credential refresh failed status={}: {}",
+                    exc.http_status,
+                    exc,
+                )
+            except Exception:
+                self.logger.exception("Kangaroo instance credential refresh failed")
+
+            stop_event = self._stop_event
+            if not self._running or stop_event is None or stop_event.is_set():
+                return
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(),
+                    timeout=_KANGAROO_CREDENTIAL_REFRESH_INTERVAL_S,
+                )
+            except TimeoutError:
+                continue
+
+    async def _stop_credential_refresh_worker(self) -> None:
+        task = self._credential_refresh_task
+        if task is None:
+            return
+        self._credential_refresh_task = None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            if asyncio.current_task() and asyncio.current_task().cancelling():
+                raise
+
     async def start(self) -> None:
         from nanobot.utils.logging_bridge import redirect_lib_logging
 
@@ -545,6 +586,11 @@ class WebSocketChannel(BaseChannel):
 
         self._running = True
         self._stop_event = asyncio.Event()
+        if self.gateway.identity_verifier is not None:
+            self._credential_refresh_task = asyncio.create_task(
+                self._credential_refresh_loop(),
+                name="kangaroo-credential-refresh",
+            )
 
         ssl_context = self._build_ssl_context()
         scheme = "wss" if ssl_context else "ws"
@@ -609,7 +655,10 @@ class WebSocketChannel(BaseChannel):
                         Path(socket_path).unlink()
 
         self._server_task = asyncio.create_task(runner())
-        await self._server_task
+        try:
+            await self._server_task
+        finally:
+            await self._stop_credential_refresh_worker()
 
     async def _connection_loop(self, connection: Any) -> None:
         request = connection.request
@@ -980,6 +1029,7 @@ class WebSocketChannel(BaseChannel):
         self._running = False
         if self._stop_event:
             self._stop_event.set()
+        await self._stop_credential_refresh_worker()
         if self._server_task:
             try:
                 await self._server_task

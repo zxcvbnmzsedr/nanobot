@@ -158,6 +158,12 @@ class KangarooIdentityVerifier:
             access_token=access_token,
             refresh_token=self._clean_token(token_payload.get("refresh_token")) or token,
             expires_at=self._resolve_expires_at(None, token_payload.get("expires_in")),
+            refresh_expires_at=self._resolve_expires_at(
+                token_payload.get("refresh_expiration")
+                or token_payload.get("refreshExpiration"),
+                token_payload.get("refresh_expires_in")
+                or token_payload.get("refreshExpiresIn"),
+            ),
         )
 
     async def verify(self, access_token: str) -> Principal:

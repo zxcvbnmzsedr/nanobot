@@ -29,7 +29,7 @@ Configure the WebSocket channel in `~/.nanobot/config.json`:
         "exchangePath": "/api/auth/exchange",
         "handoffTtlS": 60,
         "requestTimeoutS": 10,
-        "refreshSkewS": 3600,
+        "refreshSkewS": 300,
         "allowedUserIds": [],
         "runtimeRoot": "~/.nanobot/tenants"
       }
@@ -47,9 +47,11 @@ the only remote WebUI entry is a verified Kangaroo account.
 
 ## Native WebUI login
 
-Open the nanobot WebUI directly. When Kangaroo authentication is enabled, localhost bootstrap is
-disabled. The WebUI displays a Kangaroo account and password form, calls the same-origin nanobot
-login route, and enters the verified account runtime.
+Open the nanobot WebUI directly. When Kangaroo authentication is enabled and the encrypted vault has
+no usable instance identity, the WebUI displays a Kangaroo account and password form, calls the
+same-origin nanobot login route, and enters the verified account runtime. Once native login has stored
+a refreshable identity, a local browser can recover it after a gateway restart or an expired browser
+transport token. Remote and LAN callers still require a verified account handoff or API token.
 
 The gateway's current HTTP transport accepts GET requests only. Login credentials are therefore
 sent in a standard `Authorization: Basic ...` request header to `/api/auth/login`; they are never
@@ -62,11 +64,15 @@ permission-restricted vault at `<runtimeRoot>/.kangaroo-credentials.enc`; its ge
 permission-restricted as well. Set `NANOBOT_KANGAROO_CREDENTIAL_KEY` to a Fernet key when deployment
 policy requires the encryption key to come from a secret manager instead of a local key file.
 
-Before each model call, nanobot refreshes credentials that expire within `refreshSkewS`. Concurrent
-requests for the same user share one refresh operation. If the model proxy rejects a token with 401,
-nanobot refreshes and retries the complete request once. A transient account-service failure keeps
-the encrypted credential for the next attempt; an invalid refresh token clears it and requires login.
-The browser's short-lived nanobot credentials are refreshed independently while the page is active.
+At gateway startup and every minute while it is running, nanobot refreshes the bound instance
+credential when either its access or refresh token expires within `refreshSkewS`. Model and memory
+requests perform the same check, and concurrent requests for the same user share one refresh
+operation. If the model proxy rejects a token with 401, nanobot refreshes and retries the complete
+request once. A transient account-service failure keeps the encrypted credential for the next
+attempt; an explicit 401 or 403 from the refresh endpoint clears it and requires login. The browser's
+short-lived `nbwt_*` API and WebSocket credentials remain an independent transport layer: localhost
+bootstrap replaces them from the persisted instance identity, while remote callers cannot use this
+recovery path.
 
 ## Existing-token handoff
 

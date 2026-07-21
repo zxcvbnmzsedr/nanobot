@@ -131,6 +131,7 @@ async def test_refresh_rotates_tokens_using_kangaroo_contract(
                 "access_token": "next-access",
                 "refresh_token": "next-refresh",
                 "expires_in": 3600,
+                "refresh_expires_in": 86_400,
             }
         })
     ]
@@ -151,6 +152,8 @@ async def test_refresh_rotates_tokens_using_kangaroo_contract(
     assert bundle.refresh_token == "next-refresh"
     assert bundle.expires_at is not None
     assert before + 3600 <= bundle.expires_at <= after + 3600
+    assert bundle.refresh_expires_at is not None
+    assert before + 86_400 <= bundle.refresh_expires_at <= after + 86_400
     method, url, kwargs = _FakeClient.requests[0]
     assert (method, url) == (
         "POST",

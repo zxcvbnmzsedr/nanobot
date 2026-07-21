@@ -10,7 +10,7 @@ from loguru import logger as default_logger
 
 from nanobot.agent.memory_sync import KangarooMemoryClient
 from nanobot.config.paths import get_data_dir
-from nanobot.identity.credentials import get_kangaroo_credential_store
+from nanobot.identity.credentials import KangarooCredentialStore, get_kangaroo_credential_store
 from nanobot.identity.handoff import HandoffStore
 from nanobot.identity.kangaroo import KangarooIdentityVerifier
 from nanobot.identity.runtime import TenantRuntimeStore
@@ -37,6 +37,7 @@ class GatewayServices:
     local_trigger_pending_ids: Callable[[str], set[str]] | None
     handoffs: HandoffStore
     identity_verifier: KangarooIdentityVerifier | None
+    credential_store: KangarooCredentialStore
     tenant_runtimes: TenantRuntimeStore
     memory_client: KangarooMemoryClient | None
 
@@ -144,6 +145,7 @@ def build_gateway_services(
         local_trigger_pending_ids=local_trigger_pending_ids,
         handoffs=handoffs,
         identity_verifier=identity_verifier,
+        credential_store=credential_store,
         tenant_runtimes=tenant_runtimes,
         memory_client=memory_client,
     )

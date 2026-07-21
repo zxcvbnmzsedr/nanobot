@@ -314,7 +314,7 @@ class GatewayHTTPHandler:
         if auth_config.enabled and got == auth_config.exchange_path:
             return await self._handle_kangaroo_exchange(request)
         if auth_config.enabled and got == auth_config.logout_path:
-            return self._handle_kangaroo_logout(request)
+            return self._handle_kangaroo_logout(connection, request)
 
         principal = self.api_principal(request)
         if (
@@ -477,8 +477,14 @@ class GatewayHTTPHandler:
             "user": principal.public_payload(),
         })
 
-    def _handle_kangaroo_logout(self, request: WsRequest) -> Response:
+    def _handle_kangaroo_logout(self, connection: Any, request: WsRequest) -> Response:
         principal = self.api_principal(request)
+        if principal is None:
+            from nanobot.webui.http_utils import bearer_token
+
+            supplied_token = bearer_token(request.headers)
+            if supplied_token and _is_local_browser_request(connection, request.headers):
+                principal = self.credential_store.instance_principal()
         if principal is None:
             return _http_error(401, "Kangaroo account authentication required")
         self.credential_store.remove(principal.user_scope)
@@ -497,6 +503,10 @@ class GatewayHTTPHandler:
                 status=401,
             )
 
+        is_local_browser = _is_local_browser_request(connection, request.headers)
+        if self.config.kangaroo_auth.enabled and principal is None and is_local_browser:
+            principal = self.credential_store.instance_principal()
+
         if self.config.kangaroo_auth.enabled and principal is None:
             return _no_store_json_response(
                 {
@@ -506,7 +516,6 @@ class GatewayHTTPHandler:
                 status=401,
             )
 
-        is_local_browser = _is_local_browser_request(connection, request.headers)
         if principal is None and not is_local_browser:
             return _http_error(403, "bootstrap is localhost-only")
 

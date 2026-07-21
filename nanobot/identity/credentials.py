@@ -51,7 +51,7 @@ class KangarooCredentialStore:
         *,
         max_entries: int = 2048,
         ttl_s: float = 86_400,
-        refresh_skew_s: float = 3_600,
+        refresh_skew_s: float = 300,
         clock: Callable[[], float] = time.time,
         persistence_path: Path | None = None,
         refresher: RefreshCallback | None = None,
@@ -170,17 +170,30 @@ class KangarooCredentialStore:
         """Return the verified account bound to this nanobot instance."""
         with self._lock:
             principal = self._instance_principal
-            if principal is None or principal.user_scope not in self._entries:
+            if principal is None:
+                return None
+            credential = self._entries.get(principal.user_scope)
+            if credential is None:
+                return None
+            now = self._clock()
+            if self._access_expired(credential, now) and not self._refresh_available(
+                credential,
+                now,
+            ):
+                self._entries.pop(principal.user_scope, None)
+                self._clear_instance_binding_locked(principal.user_scope)
+                self._refresh_locks.pop(principal.user_scope, None)
+                self._save_locked()
                 return None
             return principal
 
     def instance_identity_metadata(self) -> dict[str, Any] | None:
         """Return instance identity plus durable memory paths when configured."""
+        principal = self.instance_principal()
+        if principal is None:
+            return None
         with self._lock:
-            principal = self._instance_principal
             persistence_path = self._persistence_path
-            if principal is None or principal.user_scope not in self._entries:
-                return None
         if persistence_path is None:
             return principal.metadata()
 
@@ -224,6 +237,13 @@ class KangarooCredentialStore:
             expected_access_token=credential.access_token,
             remove_if_unrefreshable=False,
         )
+
+    async def refresh_instance_if_due(self) -> str | None:
+        """Refresh the bound instance credential when either token is near expiry."""
+        principal = self.instance_principal()
+        if principal is None:
+            return None
+        return await self.get_valid_access_token(principal.user_scope)
 
     async def refresh_access_token(
         self,
@@ -286,7 +306,7 @@ class KangarooCredentialStore:
             try:
                 bundle = await self._refresher(credential.refresh_token or "")
             except KangarooIdentityError as exc:
-                if exc.http_status < 500:
+                if exc.http_status in {401, 403}:
                     self.remove(user_scope, access_token=credential.access_token)
                 raise
 
@@ -332,10 +352,16 @@ class KangarooCredentialStore:
             return self._refresh_locks.setdefault(user_scope, asyncio.Lock())
 
     def _refresh_due(self, credential: _Credential, now: float) -> bool:
-        return (
+        access_due = (
             credential.expires_at is not None
             and credential.expires_at <= now + self._refresh_skew_s
         )
+        refresh_due = (
+            credential.refresh_token is not None
+            and credential.refresh_expires_at is not None
+            and credential.refresh_expires_at <= now + self._refresh_skew_s
+        )
+        return access_due or refresh_due
 
     @staticmethod
     def _access_expired(credential: _Credential, now: float) -> bool:
