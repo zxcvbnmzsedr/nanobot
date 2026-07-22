@@ -326,23 +326,7 @@ def test_image_gen_tool_create():
     assert isinstance(tool, ImageGenerationTool)
 
 
-# --- Task 7: MyToolConfig + MCP wrappers ---
-
-
-def test_my_tool_config_cls():
-    from nanobot.agent.tools.self import MyTool, MyToolConfig
-    assert MyTool.config_key == "my"
-    assert MyTool.config_cls() is MyToolConfig
-
-
-def test_my_tool_enabled():
-    from nanobot.agent.tools.self import MyTool
-    mock_config = MagicMock()
-    mock_config.my.enable = True
-    ctx = ToolContext(config=mock_config, workspace="/tmp")
-    assert MyTool.enabled(ctx) is True
-    mock_config.my.enable = False
-    assert MyTool.enabled(ctx) is False
+# --- Task 7: MCP wrappers ---
 
 
 def test_mcp_wrappers_not_discoverable():
@@ -376,8 +360,6 @@ def test_loader_registers_same_tools_as_old_hardcoded():
     mock_config.web.proxy = None
     mock_config.web.user_agent = None
     mock_config.image_generation.enabled = False
-    mock_config.my.enable = True
-
     ctx = ToolContext(
         config=mock_config,
         workspace="/tmp",

@@ -4,7 +4,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from nanobot.agent.loop import AgentLoop
-from nanobot.agent.tools.self import MyTool
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ModelPresetConfig
 from nanobot.providers.factory import ProviderSnapshot
@@ -229,72 +228,6 @@ def test_model_preset_setter_raises_on_empty_string(tmp_path) -> None:
     loop = _make_loop(tmp_path)
     with pytest.raises(ValueError, match="model_preset must be a non-empty string"):
         loop.model_preset = ""
-
-
-def test_self_tool_inspect_shows_model_preset(tmp_path) -> None:
-    presets = {
-        "fast": ModelPresetConfig(model="openai/gpt-4.1"),
-    }
-    loop = _make_loop(tmp_path, presets=presets, active_preset="fast")
-    tool = MyTool(runtime_state=loop, modify_allowed=True)
-    output = tool._inspect_all()
-    assert "model_preset: 'fast'" in output
-
-
-def test_self_tool_set_model_preset_via_modify(tmp_path) -> None:
-    presets = {
-        "fast": ModelPresetConfig(model="openai/gpt-4.1"),
-    }
-    loop = _make_loop(tmp_path, presets=presets)
-    tool = MyTool(runtime_state=loop, modify_allowed=True)
-    result = tool._modify("model_preset", "fast")
-    assert "Error" not in result
-    assert loop.model_preset == "fast"
-    assert loop.model == "openai/gpt-4.1"
-
-
-def test_self_tool_set_model_preset_switches_back_to_default(tmp_path) -> None:
-    presets = {
-        "default": ModelPresetConfig(model="base-model", context_window_tokens=1000),
-        "fast": ModelPresetConfig(model="openai/gpt-4.1", context_window_tokens=32_768),
-    }
-    loop = _make_loop(tmp_path, presets=presets, active_preset="fast")
-    tool = MyTool(runtime_state=loop, modify_allowed=True)
-
-    result = tool._modify("model_preset", "default")
-
-    assert "Error" not in result
-    assert "model is now 'base-model'" in result
-    assert loop.model_preset == "default"
-    assert loop.model == "base-model"
-    assert loop.context_window_tokens == 1000
-
-
-def test_self_tool_set_model_preset_unknown_lists_available(tmp_path) -> None:
-    presets = {
-        "default": ModelPresetConfig(model="base-model"),
-        "fast": ModelPresetConfig(model="openai/gpt-4.1"),
-    }
-    loop = _make_loop(tmp_path, presets=presets)
-    tool = MyTool(runtime_state=loop, modify_allowed=True)
-
-    result = tool._modify("model_preset", "missing")
-
-    assert result == "Error: model_preset 'missing' not found. Available: default, fast."
-    assert loop.model_preset is None
-    assert loop.model == "base-model"
-
-
-def test_self_tool_set_model_clears_active_preset(tmp_path) -> None:
-    presets = {
-        "fast": ModelPresetConfig(model="openai/gpt-4.1"),
-    }
-    loop = _make_loop(tmp_path, presets=presets, active_preset="fast")
-    tool = MyTool(runtime_state=loop, modify_allowed=True)
-    result = tool._modify("model", "anthropic/claude-opus-4-5")
-    assert "Error" not in result
-    assert loop.model_preset is None
-    assert loop.model == "anthropic/claude-opus-4-5"
 
 
 def test_from_config_injects_default_preset(tmp_path) -> None:

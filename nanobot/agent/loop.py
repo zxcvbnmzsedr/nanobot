@@ -31,7 +31,6 @@ from nanobot.agent.tools.context import RequestContext, bind_request_context, re
 from nanobot.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
-from nanobot.agent.tools.self import MyTool
 from nanobot.agent.turn_hooks import AgentTurnHookSpec, build_agent_turn_hook
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.outbound_events import (
@@ -686,13 +685,6 @@ class AgentLoop:
         )
         loader = ToolLoader()
         registered = loader.load(ctx, self.tools)
-
-        # MyTool needs runtime state reference — manual registration
-        if self.tools_config.my.enable:
-            self.tools.register(
-                MyTool(runtime_state=self, modify_allowed=self.tools_config.my.allow_set)
-            )
-            registered.append("my")
 
         logger.info("Registered {} tools: {}", len(registered), registered)
 

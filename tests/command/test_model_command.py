@@ -119,16 +119,6 @@ async def test_model_command_unknown_preset_keeps_old_state(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_model_command_does_not_depend_on_my_allow_set(tmp_path) -> None:
-    loop = _make_loop(tmp_path)
-    assert loop.tools_config.my.allow_set is False
-
-    await cmd_model(_ctx(loop, "/model fast", args="fast"))
-
-    assert loop.model_preset == "fast"
-
-
-@pytest.mark.asyncio
 async def test_model_command_registered_as_exact_and_prefix(tmp_path) -> None:
     router = CommandRouter()
     register_builtin_commands(router)
