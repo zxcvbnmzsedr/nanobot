@@ -304,7 +304,10 @@ class SubagentManager:
                 cfg = self._subagent_tools_config()
                 cfg.restrict_to_workspace = workspace_scope.restrict_to_workspace
             tools = self._build_tools(workspace=root, tools_config=cfg)
-            system_prompt = self._build_subagent_prompt(workspace=root)
+            system_prompt = self._build_subagent_prompt(
+                workspace=root,
+                request_metadata=request_metadata,
+            )
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": task},
@@ -439,14 +442,27 @@ class SubagentManager:
             lines.append(f"- {result.error}")
         return "\n".join(lines) or (result.error or "Error: subagent execution failed.")
 
-    def _build_subagent_prompt(self, workspace: Path | None = None) -> str:
+    def _build_subagent_prompt(
+        self,
+        workspace: Path | None = None,
+        request_metadata: dict[str, Any] | None = None,
+    ) -> str:
         """Build a focused system prompt for the subagent."""
         from nanobot.agent.skills import SkillsLoader
 
         root = workspace or self.workspace
+        from nanobot.skill_market.store import (
+            managed_skills_path_from_metadata,
+            pin_snapshot_in_metadata,
+            snapshot_from_metadata,
+        )
+
+        metadata = pin_snapshot_in_metadata(request_metadata)
         skills_summary = SkillsLoader(
             root,
             disabled_skills=self.disabled_skills,
+            managed_skills_root=managed_skills_path_from_metadata(metadata),
+            managed_snapshot=snapshot_from_metadata(metadata),
         ).build_skills_summary()
         return render_template(
             "agent/subagent_system.md",

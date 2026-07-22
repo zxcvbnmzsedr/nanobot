@@ -898,13 +898,24 @@ async def cmd_pairing(ctx: CommandContext) -> OutboundMessage:
 async def cmd_skill(ctx: CommandContext) -> OutboundMessage:
     """List all enabled skills (name and description only)."""
     loop = ctx.loop
-    skills = loop.context.skills.list_skills(filter_unavailable=False)
+    session_metadata = ctx.session.metadata if ctx.session is not None else None
+    scope = loop.workspace_scopes.for_message(ctx.msg, session_metadata)
+    request_metadata = (
+        loop._request_metadata(ctx.msg, ctx.session)
+        if ctx.session is not None
+        else dict(ctx.msg.metadata or {})
+    )
+    loader = loop.context.skills_for_workspace(
+        scope.project_path,
+        session_metadata=request_metadata,
+    )
+    skills = loader.list_skills(filter_unavailable=False)
     if not skills:
         content = "No skills available."
     else:
         lines = [f"Available skills ({len(skills)}):", ""]
         for entry in skills:
-            desc = loop.context.skills._get_skill_description(entry["name"])
+            desc = loader._get_skill_description(entry["name"])
             lines.append(f"- **{entry['name']}** — {desc}")
         content = "\n".join(lines)
     return OutboundMessage(

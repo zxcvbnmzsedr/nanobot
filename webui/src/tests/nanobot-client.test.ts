@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MemoryRequestError, NanobotClient } from "@/lib/nanobot-client";
+import { MemoryRequestError, NanobotClient, SkillRequestError } from "@/lib/nanobot-client";
 
 /**
  * Minimal fake WebSocket implementing the subset NanobotClient touches.
@@ -17,6 +17,7 @@ class FakeSocket {
   url: string;
   readyState = FakeSocket.CONNECTING;
   sent: string[] = [];
+  throwOnSend = false;
   onopen: (() => void) | null = null;
   onmessage: ((ev: MessageEvent) => void) | null = null;
   onerror: (() => void) | null = null;
@@ -28,6 +29,7 @@ class FakeSocket {
   }
 
   send(data: string) {
+    if (this.throwOnSend) throw new Error("send failed");
     this.sent.push(data);
   }
 
@@ -895,6 +897,244 @@ describe("NanobotClient", () => {
     lastSocket().fakeOpen();
     lastSocket().close();
     expect(errors).toEqual([]);
+  });
+
+  it("correlates skill operations and emits organization update events", async () => {
+    const client = new NanobotClient({
+      url: "ws://test",
+      reconnect: false,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    const updates = vi.fn();
+    client.onSkillsUpdated(updates);
+    client.connect();
+    lastSocket().fakeOpen();
+
+    const installing = client.installSkill("sales-helper", {
+      updatePolicy: "notify",
+      expectedRowVersion: 3,
+      timeoutMs: 1_000,
+    });
+    const frame = JSON.parse(lastSocket().sent.at(-1) as string);
+    expect(frame).toMatchObject({
+      type: "skill_install",
+      skillId: "sales-helper",
+      updatePolicy: "notify",
+      expectedRowVersion: 3,
+    });
+
+    lastSocket().fakeMessage({
+      event: "skill_operation_result",
+      request_id: frame.request_id,
+      payload: { status: "applied", skillId: "sales-helper", snapshotId: "snapshot-2" },
+    });
+    lastSocket().fakeMessage({
+      event: "skills_updated",
+      snapshotId: "snapshot-2",
+      reason: "install",
+      changed: ["sales-helper"],
+    });
+
+    await expect(installing).resolves.toMatchObject({ snapshotId: "snapshot-2" });
+    expect(updates).toHaveBeenCalledWith(expect.objectContaining({ reason: "install" }));
+
+    const updating = client.updateSkill("sales-helper", {
+      version: "1.3.0",
+      updatePolicy: "notify",
+      expectedRowVersion: 4,
+      timeoutMs: 1_000,
+    });
+    const updateFrame = JSON.parse(lastSocket().sent.at(-1) as string);
+    expect(updateFrame).toMatchObject({
+      type: "skill_update",
+      skillId: "sales-helper",
+      version: "1.3.0",
+      updatePolicy: "notify",
+      expectedRowVersion: 4,
+    });
+    lastSocket().fakeMessage({
+      event: "skill_operation_result",
+      request_id: updateFrame.request_id,
+      payload: { status: "applied", skillId: "sales-helper" },
+    });
+    await expect(updating).resolves.toMatchObject({ status: "applied" });
+
+    const pinning = client.setSkillUpdatePolicy("sales-helper", "pinned", {
+      version: "1.2.3",
+      expectedRowVersion: 4,
+      timeoutMs: 1_000,
+    });
+    const policyFrame = JSON.parse(lastSocket().sent.at(-1) as string);
+    expect(policyFrame).toMatchObject({
+      type: "skill_set_update_policy",
+      skillId: "sales-helper",
+      updatePolicy: "pinned",
+      version: "1.2.3",
+      expectedRowVersion: 4,
+    });
+    lastSocket().fakeMessage({
+      event: "skill_operation_result",
+      request_id: policyFrame.request_id,
+      payload: { status: "applied", skillId: "sales-helper" },
+    });
+    await expect(pinning).resolves.toMatchObject({ status: "applied" });
+  });
+
+  it("maps correlated skill errors and rejects pending operations on close", async () => {
+    const client = new NanobotClient({
+      url: "ws://test",
+      reconnect: false,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    client.connect();
+    lastSocket().fakeOpen();
+
+    const rejected = client.uninstallSkill("required-skill", { timeoutMs: 1_000 });
+    const rejectedFrame = JSON.parse(lastSocket().sent.at(-1) as string);
+    lastSocket().fakeMessage({
+      event: "skill_operation_error",
+      request_id: rejectedFrame.request_id,
+      status: 409,
+      code: "SKILL_REQUIRED",
+      detail: "skill_required",
+      retryable: false,
+    });
+    await expect(rejected).rejects.toMatchObject<SkillRequestError>({
+      status: 409,
+      code: "SKILL_REQUIRED",
+      retryable: false,
+    });
+
+    const pending = client.syncSkills(1_000);
+    const pendingExpectation = expect(pending).rejects.toMatchObject<SkillRequestError>({
+      status: 503,
+      code: "SOCKET_CLOSED",
+    });
+    lastSocket().close();
+    await pendingExpectation;
+  });
+
+  it("does not send a queued skill operation after it times out during reconnect", async () => {
+    const client = new NanobotClient({
+      url: "ws://test",
+      reconnect: true,
+      maxBackoffMs: 50,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    client.connect();
+    lastSocket().fakeOpen();
+    lastSocket().close();
+
+    const timedOut = client.installSkill("expired-skill", { timeoutMs: 10 });
+    const timedOutExpectation = expect(timedOut).rejects.toMatchObject<SkillRequestError>({
+      status: 504,
+      code: "TIMEOUT",
+    });
+    await vi.advanceTimersByTimeAsync(11);
+    await timedOutExpectation;
+    await vi.advanceTimersByTimeAsync(50);
+
+    const reconnected = lastSocket();
+    reconnected.fakeOpen();
+    expect(reconnected.sent).toEqual([]);
+  });
+
+  it("sends and resolves a skill operation queued during reconnect", async () => {
+    const client = new NanobotClient({
+      url: "ws://test",
+      reconnect: true,
+      maxBackoffMs: 50,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    client.connect();
+    lastSocket().fakeOpen();
+    lastSocket().close();
+
+    const installing = client.installSkill("queued-skill", { timeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(50);
+    const reconnected = lastSocket();
+    reconnected.fakeOpen();
+    const frame = JSON.parse(reconnected.sent.at(-1) as string);
+    expect(frame).toMatchObject({ type: "skill_install", skillId: "queued-skill" });
+
+    reconnected.fakeMessage({
+      event: "skill_operation_result",
+      request_id: frame.request_id,
+      payload: { status: "applied", skillId: "queued-skill" },
+    });
+    await expect(installing).resolves.toMatchObject({ status: "applied" });
+  });
+
+  it("removes only the timed-out skill operation from a concurrent send queue", async () => {
+    const client = new NanobotClient({
+      url: "ws://test",
+      reconnect: true,
+      maxBackoffMs: 50,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    client.connect();
+    lastSocket().fakeOpen();
+    lastSocket().close();
+
+    const expired = client.installSkill("expired-skill", { timeoutMs: 10 });
+    const survivor = client.installSkill("surviving-skill", { timeoutMs: 1_000 });
+    client.sendMessage("chat-queued", "keep this frame");
+    const expiredExpectation = expect(expired).rejects.toMatchObject<SkillRequestError>({
+      code: "TIMEOUT",
+    });
+    await vi.advanceTimersByTimeAsync(11);
+    await expiredExpectation;
+    await vi.advanceTimersByTimeAsync(50);
+
+    const reconnected = lastSocket();
+    reconnected.fakeOpen();
+    const frames = reconnected.sent.map((raw) => JSON.parse(raw));
+    expect(frames).not.toContainEqual(expect.objectContaining({ skillId: "expired-skill" }));
+    expect(frames).toContainEqual(expect.objectContaining({
+      type: "skill_install",
+      skillId: "surviving-skill",
+    }));
+    expect(frames).toContainEqual(expect.objectContaining({
+      type: "message",
+      chat_id: "chat-queued",
+      content: "keep this frame",
+    }));
+
+    const survivorFrame = frames.find((frame) => frame.skillId === "surviving-skill");
+    reconnected.fakeMessage({
+      event: "skill_operation_result",
+      request_id: survivorFrame.request_id,
+      payload: { status: "applied", skillId: "surviving-skill" },
+    });
+    await expect(survivor).resolves.toMatchObject({ skillId: "surviving-skill" });
+  });
+
+  it("drops a failed-send skill frame when socket close rejects the request", async () => {
+    const client = new NanobotClient({
+      url: "ws://test",
+      reconnect: true,
+      maxBackoffMs: 50,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    client.connect();
+    const failedSocket = lastSocket();
+    failedSocket.fakeOpen();
+    failedSocket.throwOnSend = true;
+
+    const installing = client.installSkill("failed-send-skill", { timeoutMs: 1_000 });
+    const rejectedExpectation = expect(installing).rejects.toMatchObject<SkillRequestError>({
+      status: 503,
+      code: "SOCKET_CLOSED",
+    });
+    failedSocket.close();
+    await rejectedExpectation;
+    await vi.advanceTimersByTimeAsync(50);
+
+    const reconnected = lastSocket();
+    reconnected.fakeOpen();
+    expect(reconnected.sent).not.toContainEqual(
+      expect.stringContaining("failed-send-skill"),
+    );
   });
 
   it("surfaces 'reconnecting' only on an unexpected drop", async () => {

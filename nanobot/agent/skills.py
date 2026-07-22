@@ -4,9 +4,13 @@ import json
 import os
 import re
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import yaml
+
+from nanobot.skill_market.models import SkillSnapshot
 
 # Default builtin skills directory (relative to this file)
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
@@ -26,13 +30,42 @@ class SkillsLoader:
     specific tools or perform certain tasks.
     """
 
-    def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None, disabled_skills: set[str] | None = None):
+    def __init__(
+        self,
+        workspace: Path,
+        builtin_skills_dir: Path | None = None,
+        disabled_skills: set[str] | None = None,
+        *,
+        managed_skills_root: Path | None = None,
+        managed_snapshot: SkillSnapshot | Mapping[str, Any] | None = None,
+    ):
         self.workspace = workspace
         self.workspace_skills = workspace / "skills"
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
         self.disabled_skills = disabled_skills or set()
+        self.managed_skills_root = (
+            managed_skills_root.expanduser().resolve(strict=False)
+            if managed_skills_root is not None
+            else None
+        )
+        if isinstance(managed_snapshot, SkillSnapshot):
+            self.managed_snapshot = managed_snapshot
+        elif isinstance(managed_snapshot, Mapping):
+            try:
+                self.managed_snapshot = SkillSnapshot.model_validate(managed_snapshot)
+            except ValueError:
+                self.managed_snapshot = None
+        else:
+            self.managed_snapshot = None
+        self.collisions: set[str] = set()
 
-    def _skill_entries_from_dir(self, base: Path, source: str, *, skip_names: set[str] | None = None) -> list[dict[str, str]]:
+    def _skill_entries_from_dir(
+        self,
+        base: Path,
+        source: str,
+        *,
+        skip_names: set[str] | None = None,
+    ) -> list[dict[str, str]]:
         if not base.exists():
             return []
         entries: list[dict[str, str]] = []
@@ -48,6 +81,39 @@ class SkillsLoader:
             entries.append({"name": name, "path": str(skill_file), "source": source})
         return entries
 
+    def _managed_entries(self) -> list[dict[str, str]]:
+        root = self.managed_skills_root
+        snapshot = self.managed_snapshot
+        if root is None or snapshot is None:
+            return []
+        entries: list[dict[str, str]] = []
+        releases_root = (root / "releases").resolve(strict=False)
+        for name, skill in sorted(snapshot.skills.items()):
+            relative = Path(skill.relative_path)
+            candidate = (root / relative).resolve(strict=False)
+            if (
+                relative.is_absolute()
+                or candidate == releases_root
+                or releases_root not in candidate.parents
+            ):
+                continue
+            skill_file = candidate / "SKILL.md"
+            if not skill_file.is_file():
+                continue
+            entries.append(
+                {
+                    "name": name,
+                    "path": str(skill_file),
+                    "source": "managed",
+                    "release_id": skill.release_id,
+                    "version": skill.version,
+                    "sha256": skill.sha256,
+                    "revision": snapshot.revision,
+                    "snapshot_id": snapshot.snapshot_id,
+                }
+            )
+        return entries
+
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
         """
         List all available skills.
@@ -58,12 +124,22 @@ class SkillsLoader:
         Returns:
             List of skill info dicts with 'name', 'path', 'source'.
         """
-        skills = self._skill_entries_from_dir(self.workspace_skills, "workspace")
-        workspace_names = {entry["name"] for entry in skills}
+        workspace_skills = self._skill_entries_from_dir(self.workspace_skills, "workspace")
+        workspace_names = {entry["name"] for entry in workspace_skills}
+        builtin_skills: list[dict[str, str]] = []
         if self.builtin_skills and self.builtin_skills.exists():
-            skills.extend(
-                self._skill_entries_from_dir(self.builtin_skills, "builtin", skip_names=workspace_names)
+            builtin_skills = self._skill_entries_from_dir(
+                self.builtin_skills,
+                "builtin",
+                skip_names=workspace_names,
             )
+        local_skills = workspace_skills + builtin_skills
+        managed_skills = self._managed_entries()
+        managed_names = {entry["name"] for entry in managed_skills}
+        self.collisions = managed_names & {entry["name"] for entry in local_skills}
+        # Managed/local collisions fail closed: neither source can silently shadow
+        # the other and change which reviewed instructions reach the model.
+        skills = [entry for entry in managed_skills + local_skills if entry["name"] not in self.collisions]
 
         if self.disabled_skills:
             skills = [s for s in skills if s["name"] not in self.disabled_skills]
@@ -82,13 +158,15 @@ class SkillsLoader:
         Returns:
             Skill content or None if not found.
         """
-        roots = [self.workspace_skills]
-        if self.builtin_skills:
-            roots.append(self.builtin_skills)
-        for root in roots:
-            path = root / name / "SKILL.md"
-            if path.exists():
-                return path.read_text(encoding="utf-8")
+        entry = next(
+            (item for item in self.list_skills(filter_unavailable=False) if item["name"] == name),
+            None,
+        )
+        if entry is not None:
+            try:
+                return Path(entry["path"]).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                return None
         return None
 
     def load_skills_for_context(self, skill_names: list[str]) -> str:
@@ -133,12 +211,17 @@ class SkillsLoader:
             meta = self._get_skill_meta(skill_name)
             available = self._check_requirements(meta)
             desc = self._get_skill_description(skill_name)
+            location = (
+                f'`read_skill(skill_name="{skill_name}")`'
+                if entry["source"] == "managed"
+                else f"`{entry['path']}`"
+            )
             if available:
-                lines.append(f"- **{skill_name}** — {desc}  `{entry['path']}`")
+                lines.append(f"- **{skill_name}** — {desc}  {location}")
             else:
                 missing = self._get_missing_requirements(meta)
                 suffix = f" (unavailable: {missing})" if missing else " (unavailable)"
-                lines.append(f"- **{skill_name}** — {desc}{suffix}  `{entry['path']}`")
+                lines.append(f"- **{skill_name}** — {desc}{suffix}  {location}")
         return "\n".join(lines)
 
     def _get_missing_requirements(self, skill_meta: dict) -> str:

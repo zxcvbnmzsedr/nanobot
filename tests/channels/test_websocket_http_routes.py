@@ -2956,3 +2956,118 @@ def test_legacy_gateway_key_headers_do_not_authenticate_remote(
 ) -> None:
     channel = _ch(bus, host="127.0.0.1")
     assert channel.gateway.http._handle_bootstrap(_REMOTE, _FakeReq(headers)).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_skill_market_routes_are_principal_bound_and_sanitize_capabilities(
+    bus: MagicMock,
+    tmp_path: Path,
+) -> None:
+    port = _free_port()
+    channel = _ch(bus, workspace_path=tmp_path, port=port)
+    principal = Principal(user_id="101", org_id="9001")
+    service = MagicMock()
+    service.start = AsyncMock()
+    service.stop = AsyncMock()
+    service.subscribe = MagicMock(return_value=MagicMock())
+    service.active_entries = MagicMock(return_value=[{
+        "skillKey": "sales-helper",
+        "version": "1.0.0",
+        "mandatory": True,
+        "relativePath": "releases/sales-helper/private",
+    }])
+    service.catalog = AsyncMock(return_value={
+        "skills": [{
+            "skillKey": "sales-helper",
+            "displayName": "Sales Helper",
+            "summary": "Prepare quotations.",
+            "latestVersion": "1.1.0",
+            "artifactUrl": "https://storage.invalid/private.zip",
+            "nested": {"accessToken": "must-not-leak"},
+        }],
+    })
+    service.detail = AsyncMock(return_value={
+        "skillKey": "sales-helper",
+        "publisher": {"name": "Kangaroo", "verified": True},
+        "signature": {"status": "verified", "keyId": "release-1"},
+        "changelog": "Improved templates.",
+        "content": "private SKILL.md body",
+        "artifactPath": "private/artifact.zip",
+    })
+    service.inventory = AsyncMock(return_value={
+        "subscriptions": [{
+            "skillKey": "sales-helper",
+            "updatePolicy": "notify",
+            "rowVersion": 4,
+        }],
+        "local": {
+            "revision": "g2-o4:digest",
+            "snapshotId": "snapshot-2",
+            "installed": [{"skillKey": "sales-helper", "version": "1.0.0"}],
+            "sync": {"lastSuccessAt": "2026-07-21T10:00:00Z", "lastStatus": "applied"},
+        },
+    })
+    channel._skill_market_service = service
+    channel.gateway.http.skill_market_service = service
+    server_task = asyncio.create_task(channel.start())
+    await asyncio.sleep(0.3)
+    try:
+        unauthenticated = await _http_get(
+            f"http://127.0.0.1:{port}/api/webui/skill-market"
+        )
+        assert unauthenticated.status_code == 401
+
+        local_token = channel.gateway.tokens.issue_api_token(300)
+        local_only = await _http_get(
+            f"http://127.0.0.1:{port}/api/webui/skill-market",
+            headers={"Authorization": f"Bearer {local_token}"},
+        )
+        assert local_only.status_code == 403
+
+        token = channel.gateway.tokens.issue_api_token(300, principal)
+        headers = {"Authorization": f"Bearer {token}"}
+        catalog = await _http_get(
+            f"http://127.0.0.1:{port}/api/webui/skill-market",
+            headers=headers,
+        )
+        detail = await _http_get(
+            f"http://127.0.0.1:{port}/api/webui/skill-market/sales-helper",
+            headers=headers,
+        )
+        installed = await _http_get(
+            f"http://127.0.0.1:{port}/api/webui/skill-market/installed",
+            headers=headers,
+        )
+        status = await _http_get(
+            f"http://127.0.0.1:{port}/api/webui/skill-market/status",
+            headers=headers,
+        )
+        skills = await _http_get(
+            f"http://127.0.0.1:{port}/api/webui/skills",
+            headers=headers,
+        )
+
+        assert catalog.status_code == detail.status_code == installed.status_code == 200
+        catalog_body = catalog.json()
+        assert catalog_body["skills"][0]["skillKey"] == "sales-helper"
+        assert "artifactUrl" not in catalog_body["skills"][0]
+        assert catalog_body["skills"][0]["nested"] == {}
+        assert detail.json()["publisher"]["name"] == "Kangaroo"
+        assert "content" not in detail.json()
+        assert "artifactPath" not in detail.json()
+        assert status.json() == {
+            "enabled": True,
+            "available": True,
+            "snapshotId": "snapshot-2",
+            "revision": "g2-o4:digest",
+            "lastSyncedAt": "2026-07-21T10:00:00Z",
+            "syncStatus": "applied",
+        }
+        managed = next(item for item in skills.json()["skills"] if item["name"] == "sales-helper")
+        assert managed["source"] == "managed"
+        assert managed["required"] is True
+        assert "path" not in json.dumps(managed).lower()
+        service.active_entries.assert_called()
+    finally:
+        await channel.stop()
+        await server_task

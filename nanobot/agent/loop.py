@@ -80,6 +80,11 @@ from nanobot.session.manager import (
     SessionManager,
     replay_max_messages_for_context,
 )
+from nanobot.skill_market.provenance import provenance_only
+from nanobot.skill_market.store import (
+    SKILL_SNAPSHOT_METADATA_KEY,
+    pin_snapshot_in_metadata,
+)
 from nanobot.triggers.local_turns import LocalTriggerTurnCoordinator
 from nanobot.utils.document import extract_documents, reference_non_image_attachments
 from nanobot.utils.helpers import image_placeholder_text
@@ -97,6 +102,39 @@ if TYPE_CHECKING:
         ToolsConfig,
     )
     from nanobot.cron.service import CronService
+
+
+_IDENTITY_RUNTIME_FIELDS = frozenset({
+    "runtime_root",
+    "user_memory_path",
+    "org_memory_path",
+    "managed_skills_path",
+})
+_IDENTITY_MATCH_FIELDS = ("source", "user_scope", "org_scope")
+
+
+def _merge_trusted_session_identity(
+    message_identity: object,
+    session_identity: object,
+) -> dict[str, Any] | None:
+    """Preserve trusted runtime paths when a message carries the same principal."""
+    if not isinstance(session_identity, Mapping):
+        return dict(message_identity) if isinstance(message_identity, Mapping) else None
+    if not isinstance(message_identity, Mapping):
+        return dict(session_identity)
+    if any(
+        message_identity.get(field) != session_identity.get(field)
+        for field in _IDENTITY_MATCH_FIELDS
+    ):
+        return dict(message_identity)
+    merged = dict(session_identity)
+    merged.update(
+        (key, value)
+        for key, value in message_identity.items()
+        if key not in _IDENTITY_RUNTIME_FIELDS
+    )
+    return merged
+
 
 class TurnState(Enum):
     RESTORE = auto()
@@ -463,11 +501,13 @@ class AgentLoop:
     @staticmethod
     def _request_metadata(msg: InboundMessage, session: Session) -> dict[str, Any]:
         metadata = dict(msg.metadata or {})
-        if IDENTITY_METADATA_KEY not in metadata:
-            identity = session.metadata.get(IDENTITY_METADATA_KEY)
-            if isinstance(identity, Mapping):
-                metadata[IDENTITY_METADATA_KEY] = dict(identity)
-        return metadata
+        identity = _merge_trusted_session_identity(
+            metadata.get(IDENTITY_METADATA_KEY),
+            session.metadata.get(IDENTITY_METADATA_KEY),
+        )
+        if identity is not None:
+            metadata[IDENTITY_METADATA_KEY] = identity
+        return pin_snapshot_in_metadata(metadata)
 
     async def _consolidate_with_request_context(
         self,
@@ -761,6 +801,7 @@ class AgentLoop:
         pending_summary: str | None,
         include_memory_recent_history: bool = True,
         runtime_context_blocks: list[RuntimeContextBlock] | None = None,
+        skill_snapshot: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the initial message list for the LLM turn."""
         scope = self.workspace_scopes.for_message(msg, session.metadata)
@@ -778,6 +819,7 @@ class AgentLoop:
             include_memory_recent_history=include_memory_recent_history,
             session_key=session.key,
             unified_session=self._unified_session,
+            skill_snapshot=skill_snapshot,
         )
 
     def _request_context_for_turn(self, ctx: TurnContext) -> RequestContext:
@@ -1640,10 +1682,14 @@ class AgentLoop:
             and isinstance(identity.get("user_scope"), str)
             and isinstance(identity.get("user_id"), str)
             and isinstance(identity.get("org_id"), str)
-            and ctx.session.metadata.get(IDENTITY_METADATA_KEY) != identity
         ):
-            ctx.session.metadata[IDENTITY_METADATA_KEY] = dict(identity)
-            self.sessions.save(ctx.session)
+            merged_identity = _merge_trusted_session_identity(
+                identity,
+                ctx.session.metadata.get(IDENTITY_METADATA_KEY),
+            )
+            if ctx.session.metadata.get(IDENTITY_METADATA_KEY) != merged_identity:
+                ctx.session.metadata[IDENTITY_METADATA_KEY] = merged_identity
+                self.sessions.save(ctx.session)
         self.workspace_scopes.persist_message_scope(ctx.session, msg)
 
         if self._restore_runtime_checkpoint(ctx.session):
@@ -1743,6 +1789,7 @@ class AgentLoop:
             ctx.pending_summary,
             include_memory_recent_history=not ctx.ephemeral,
             runtime_context_blocks=ctx.runtime_context_blocks,
+            skill_snapshot=ctx.request_context.metadata.get(SKILL_SNAPSHOT_METADATA_KEY),
         )
         ctx.user_persisted_early = self._persist_user_message_early(
             ctx.msg,
@@ -1936,7 +1983,14 @@ class AgentLoop:
                         session.key,
                     )
                     continue
-                if isinstance(content, str) and len(content) > self.max_tool_result_chars:
+                persisted_skill = (
+                    provenance_only(content)
+                    if entry.get("name") == "read_skill" and isinstance(content, str)
+                    else None
+                )
+                if persisted_skill is not None:
+                    entry["content"] = persisted_skill
+                elif isinstance(content, str) and len(content) > self.max_tool_result_chars:
                     entry["content"] = truncate_text_fn(content, self.max_tool_result_chars)
                 elif isinstance(content, list):
                     filtered = self._sanitize_persisted_blocks(content, should_truncate_text=True)
@@ -1993,7 +2047,26 @@ class AgentLoop:
 
     def _set_runtime_checkpoint(self, session: Session, payload: dict[str, Any]) -> None:
         """Persist the latest in-flight turn state into session metadata."""
-        session.metadata[self._RUNTIME_CHECKPOINT_KEY] = payload
+        sanitized = dict(payload)
+        completed = payload.get("completed_tool_results")
+        if isinstance(completed, list):
+            safe_results: list[Any] = []
+            for value in completed:
+                if not isinstance(value, dict):
+                    safe_results.append(value)
+                    continue
+                result = dict(value)
+                content = result.get("content")
+                persisted_skill = (
+                    provenance_only(content)
+                    if result.get("name") == "read_skill" and isinstance(content, str)
+                    else None
+                )
+                if persisted_skill is not None:
+                    result["content"] = persisted_skill
+                safe_results.append(result)
+            sanitized["completed_tool_results"] = safe_results
+        session.metadata[self._RUNTIME_CHECKPOINT_KEY] = sanitized
         self.sessions.save(session)
 
     def _mark_pending_user_turn(self, session: Session) -> None:

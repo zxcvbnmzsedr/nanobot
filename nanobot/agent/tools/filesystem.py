@@ -18,6 +18,7 @@ from nanobot.agent.tools.schema import (
 )
 from nanobot.config_base import Base
 from nanobot.security.workspace_access import current_tool_workspace
+from nanobot.security.workspace_policy import is_path_within
 from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
 
 
@@ -51,6 +52,7 @@ class _FsTool(Tool):
         file_states: FileStates | None = None,
         restrict_to_workspace: bool | None = None,
         sandbox_restricts_workspace: bool = False,
+        skills_read_only: bool = False,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
@@ -68,6 +70,7 @@ class _FsTool(Tool):
             else allowed_dir is not None
         )
         self._sandbox_restricts_workspace = sandbox_restricts_workspace
+        self._skills_read_only = skills_read_only
         # Explicit state is used by isolated runners like Dream/subagents.
         # Main AgentLoop tools leave this unset and resolve state from the
         # current async task, which keeps shared tool instances session-safe.
@@ -92,6 +95,7 @@ class _FsTool(Tool):
             file_states=ctx.file_state_store,
             restrict_to_workspace=ctx.config.restrict_to_workspace,
             sandbox_restricts_workspace=sandbox_restricts,
+            skills_read_only=ctx.config.skills_read_only,
         )
 
     @property
@@ -143,12 +147,26 @@ class _FsTool(Tool):
         )
 
     def _resolve_write(self, path: str) -> Path:
-        return self._resolve_with_extra(
+        resolved = self._resolve_with_extra(
             path,
             self._extra_write_allowed_dirs,
             self._extra_write_allowed_files,
             include_media_dir=False,
         )
+        if self._skills_read_only:
+            access = current_tool_workspace(
+                self._workspace,
+                restrict_to_workspace=self._restrict_to_workspace,
+                sandbox_restricts_workspace=self._sandbox_restricts_workspace,
+            )
+            if access.project_path is not None:
+                skills_root = (access.project_path / "skills").resolve(strict=False)
+                if is_path_within(resolved.resolve(strict=False), skills_root):
+                    raise PermissionError(
+                        "Workspace skills are read-only; install or update skills through "
+                        "the managed Skill Market."
+                    )
+        return resolved
 
     def _resolve(self, path: str) -> Path:
         return self._resolve_read(path)

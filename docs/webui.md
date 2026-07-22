@@ -146,9 +146,11 @@ After an App or integration is available, mention it from the composer with
 ## Skills
 
 The Skills view shows the skill instructions available to the agent, including
-built-in skills and workspace-provided skills. Check this view when you want to
-know whether nanobot already has a focused workflow for a task before you ask it
-to perform that task.
+built-in skills and workspace-provided skills. With the Kangaroo managed marketplace enabled, it
+also provides **Discover**, **Installed**, and **Updates** views for organization-approved Skills.
+Eligible organization main accounts can install, update, pin, roll back, or remove a Skill; required
+or blocked policy is shown as read-only. See [Managed Skill marketplace](./managed-skill-market.md)
+for configuration and operational behavior.
 
 ## Automations
 

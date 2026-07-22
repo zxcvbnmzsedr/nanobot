@@ -11,7 +11,13 @@ from pathlib import Path
 from nanobot.config.paths import get_media_dir
 
 
-def _bwrap(command: str, workspace: str, cwd: str) -> str:
+def _bwrap(
+    command: str,
+    workspace: str,
+    cwd: str,
+    *,
+    read_only_paths: list[str] | None = None,
+) -> str:
     """Wrap command in a bubblewrap sandbox (requires bwrap in container).
 
     Only the workspace is bind-mounted read-write; its parent dir (which holds
@@ -50,6 +56,15 @@ def _bwrap(command: str, workspace: str, cwd: str) -> str:
         "--tmpfs", str(ws.parent),        # mask config dir
         "--dir", str(ws),                 # recreate workspace mount point
         "--bind", str(ws), str(ws),
+    ]
+    for path in read_only_paths or []:
+        resolved = Path(path).resolve(strict=False)
+        try:
+            resolved.relative_to(ws)
+        except ValueError:
+            continue
+        args += ["--ro-bind-try", str(resolved), str(resolved)]
+    args += [
         "--ro-bind-try", str(media), str(media),  # read-only access to media
         "--chdir", sandbox_cwd,
         "--", "sh", "-c", command,
@@ -60,8 +75,20 @@ def _bwrap(command: str, workspace: str, cwd: str) -> str:
 _BACKENDS = {"bwrap": _bwrap}
 
 
-def wrap_command(sandbox: str, command: str, workspace: str, cwd: str) -> str:
+def wrap_command(
+    sandbox: str,
+    command: str,
+    workspace: str,
+    cwd: str,
+    *,
+    read_only_paths: list[str] | None = None,
+) -> str:
     """Wrap *command* using the named sandbox backend."""
     if backend := _BACKENDS.get(sandbox):
-        return backend(command, workspace, cwd)
+        return backend(
+            command,
+            workspace,
+            cwd,
+            read_only_paths=read_only_paths,
+        )
     raise ValueError(f"Unknown sandbox backend {sandbox!r}. Available: {list(_BACKENDS)}")

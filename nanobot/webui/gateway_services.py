@@ -16,6 +16,7 @@ from nanobot.identity.kangaroo import KangarooIdentityVerifier
 from nanobot.identity.runtime import TenantRuntimeStore
 from nanobot.webui.gateway_tokens import GatewayTokenStore
 from nanobot.webui.media_gateway import WebUIMediaGateway
+from nanobot.webui.skill_market import SkillMarketServiceProtocol
 from nanobot.webui.transcript import WebUITranscriptRecorder
 from nanobot.webui.workspaces import WebUIWorkspaceController
 from nanobot.webui.ws_http import GatewayHTTPHandler
@@ -40,6 +41,7 @@ class GatewayServices:
     credential_store: KangarooCredentialStore
     tenant_runtimes: TenantRuntimeStore
     memory_client: KangarooMemoryClient | None
+    skill_market_service: SkillMarketServiceProtocol | None
 
 
 def build_gateway_services(
@@ -59,6 +61,7 @@ def build_gateway_services(
     cron_pending_job_ids: Callable[[str], set[str]] | None = None,
     local_trigger_pending_ids: Callable[[str], set[str]] | None = None,
     channel_feature_action: Callable[..., Any] | None = None,
+    skill_market_service: SkillMarketServiceProtocol | None = None,
     logger: Any = default_logger,
 ) -> GatewayServices:
     tokens = GatewayTokenStore()
@@ -98,6 +101,20 @@ def build_gateway_services(
         if auth_config.enabled and auth_config.memory_api_url
         else None
     )
+    if skill_market_service is None and auth_config.skill_market_enabled:
+        from nanobot.skill_market import SkillMarketService, SkillMarketSettings
+
+        skill_market_service = SkillMarketService(
+            SkillMarketSettings(
+                enabled=True,
+                base_url=auth_config.resolved_skill_market_api_url,
+                runtime_root=runtime_root,
+                public_keys=auth_config.skill_market_public_keys,
+                request_timeout_s=auth_config.request_timeout_s,
+                default_poll_s=auth_config.skill_market_poll_interval_s,
+            ),
+            credential_store,
+        )
     media = WebUIMediaGateway(
         workspace_path=workspace_path,
         logger=logger,
@@ -125,6 +142,7 @@ def build_gateway_services(
         workspaces=workspaces,
         skills_workspace_path=workspace_path,
         disabled_skills=disabled_skills,
+        skill_market_service=skill_market_service,
         cron_service=cron_service,
         local_trigger_store=local_trigger_store,
         cron_pending_job_ids=cron_pending_job_ids,
@@ -148,4 +166,5 @@ def build_gateway_services(
         credential_store=credential_store,
         tenant_runtimes=tenant_runtimes,
         memory_client=memory_client,
+        skill_market_service=skill_market_service,
     )

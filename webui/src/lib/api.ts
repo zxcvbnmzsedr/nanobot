@@ -23,6 +23,10 @@ import type {
   SettingsUpdate,
   SidebarStatePayload,
   SkillDetail,
+  SkillInventoryPayload,
+  SkillMarketItem,
+  SkillMarketPayload,
+  SkillMarketStatusPayload,
   SkillsPayload,
   SlashCommand,
   SlashCommandLifecycle,
@@ -290,6 +294,131 @@ export async function fetchSkillDetail(
     undefined,
     API_READ_TIMEOUT_MS,
   );
+}
+
+export async function fetchSkillMarket(
+  token: string,
+  base: string = "",
+): Promise<SkillMarketPayload> {
+  const payload = await request<Record<string, unknown>>(
+    `${base}/api/webui/skill-market`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+  return normalizeSkillMarketPayload(payload);
+}
+
+export async function fetchSkillMarketDetail(
+  token: string,
+  skillId: string,
+  base: string = "",
+): Promise<SkillMarketItem> {
+  const payload = await request<Record<string, unknown>>(
+    `${base}/api/webui/skill-market/${encodeURIComponent(skillId)}`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+  const nested = payload.skill;
+  return normalizeSkillMarketItem(
+    nested && typeof nested === "object" ? nested as Record<string, unknown> : payload,
+    skillId,
+  );
+}
+
+export async function fetchInstalledSkills(
+  token: string,
+  base: string = "",
+): Promise<SkillInventoryPayload> {
+  const payload = await request<Record<string, unknown>>(
+    `${base}/api/webui/skill-market/installed`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+  return normalizeSkillMarketPayload(payload, true) as SkillInventoryPayload;
+}
+
+export async function fetchSkillMarketStatus(
+  token: string,
+  base: string = "",
+): Promise<SkillMarketStatusPayload> {
+  return request<SkillMarketStatusPayload>(
+    `${base}/api/webui/skill-market/status`,
+    token,
+    undefined,
+    API_READ_TIMEOUT_MS,
+  );
+}
+
+function normalizeSkillMarketPayload(
+  payload: Record<string, unknown>,
+  inventory: boolean = false,
+): SkillMarketPayload {
+  const raw = payload.skills
+    ?? payload.items
+    ?? payload.catalog
+    ?? payload.installed
+    ?? payload.subscriptions
+    ?? [];
+  let skills = normalizeSkillMarketItems(raw);
+  if (inventory) {
+    const local = payload.local;
+    const localInstalled = local && typeof local === "object"
+      ? (local as Record<string, unknown>).installed
+      : undefined;
+    const active = normalizeSkillMarketItems(localInstalled ?? []).map((item) => ({
+      ...item,
+      installed: true,
+      installedVersion: item.installedVersion || item.version,
+    }));
+    const remoteById = new Map(skills.map((item) => [item.skillId, item]));
+    skills = [
+      ...active.map((item) => ({ ...remoteById.get(item.skillId), ...item })),
+      ...skills.filter((item) => !active.some((installed) => installed.skillId === item.skillId)),
+    ];
+  }
+  return { ...(payload as unknown as SkillMarketPayload), skills };
+}
+
+function normalizeSkillMarketItems(raw: unknown): SkillMarketItem[] {
+  if (Array.isArray(raw)) {
+    return raw
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+      .map((item) => normalizeSkillMarketItem(item));
+  }
+  if (raw && typeof raw === "object") {
+    return Object.entries(raw as Record<string, unknown>)
+      .filter((entry): entry is [string, Record<string, unknown>] => (
+        Boolean(entry[1]) && typeof entry[1] === "object"
+      ))
+      .map(([skillId, item]) => normalizeSkillMarketItem(item, skillId));
+  }
+  return [];
+}
+
+function normalizeSkillMarketItem(
+  item: Record<string, unknown>,
+  fallbackId: string = "",
+): SkillMarketItem {
+  const skillId = [item.skillId, item.skillKey, item.key, item.name, fallbackId]
+    .find((value): value is string => typeof value === "string" && value.length > 0) ?? fallbackId;
+  const normalized = item as unknown as SkillMarketItem;
+  const required = normalized.required === true || normalized.mandatory === true;
+  const versions = normalized.versions?.map((version) => ({
+    ...version,
+    revoked: version.revoked === true || version.status === "revoked",
+  }));
+  return {
+    ...normalized,
+    skillId,
+    required,
+    mandatory: required,
+    canUninstall: required ? false : normalized.canUninstall,
+    publisher: normalized.publisher || normalized.publisherId,
+    ...(versions ? { versions } : {}),
+  };
 }
 
 export async function deleteSession(

@@ -20,6 +20,14 @@ from nanobot.runtime_context import (
     RuntimeContextBlock,
     append_runtime_context,
 )
+from nanobot.skill_market.models import SkillSnapshot
+from nanobot.skill_market.provenance import filter_revoked_skill_history
+from nanobot.skill_market.store import (
+    ManagedSkillStore,
+    managed_skills_path_from_metadata,
+    pin_snapshot_in_metadata,
+    snapshot_from_metadata,
+)
 from nanobot.utils.helpers import (
     detect_image_mime,
     load_bundled_template,
@@ -71,6 +79,7 @@ class ContextBuilder:
         session_key: str | None = None,
         unified_session: bool = False,
         session_metadata: Mapping[str, Any] | None = None,
+        skill_snapshot: SkillSnapshot | Mapping[str, Any] | None = None,
     ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         root = workspace or self.workspace
@@ -86,13 +95,18 @@ class ContextBuilder:
         if memory_sections:
             parts.append("# Memory\n\n" + "\n\n".join(memory_sections))
 
-        always_skills = self.skills.get_always_skills()
+        skills = self.skills_for_workspace(
+            root,
+            session_metadata=session_metadata,
+            skill_snapshot=skill_snapshot,
+        )
+        always_skills = skills.get_always_skills()
         if always_skills:
-            always_content = self.skills.load_skills_for_context(always_skills)
+            always_content = skills.load_skills_for_context(always_skills)
             if always_content:
                 parts.append(f"# Active Skills\n\n{always_content}")
 
-        skills_summary = self.skills.build_skills_summary(exclude=set(always_skills))
+        skills_summary = skills.build_skills_summary(exclude=set(always_skills))
         if skills_summary:
             parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
 
@@ -122,6 +136,32 @@ class ContextBuilder:
             parts.append(f"[Archived Context Summary]\n\n{session_summary}")
 
         return "\n\n---\n\n".join(parts)
+
+    def skills_for_workspace(
+        self,
+        workspace: Path,
+        *,
+        session_metadata: Mapping[str, Any] | None = None,
+        skill_snapshot: SkillSnapshot | Mapping[str, Any] | None = None,
+    ) -> SkillsLoader:
+        """Build a tenant-aware loader pinned to one managed Skill snapshot."""
+        metadata = pin_snapshot_in_metadata(session_metadata)
+        managed_root = managed_skills_path_from_metadata(metadata)
+        snapshot = (
+            skill_snapshot
+            if skill_snapshot is not None
+            else snapshot_from_metadata(metadata)
+        )
+        root = workspace.expanduser().resolve(strict=False)
+        if root == self.workspace.expanduser().resolve(strict=False) and managed_root is None:
+            return self.skills
+        return SkillsLoader(
+            root,
+            builtin_skills_dir=self.skills.builtin_skills,
+            disabled_skills=set(self.skills.disabled_skills),
+            managed_skills_root=managed_root,
+            managed_snapshot=snapshot,
+        )
 
     def memory_for_workspace(self, workspace: Path) -> MemoryStore:
         root = workspace.expanduser().resolve(strict=False)
@@ -236,12 +276,20 @@ class ContextBuilder:
         include_memory_recent_history: bool = True,
         session_key: str | None = None,
         unified_session: bool = False,
+        skill_snapshot: SkillSnapshot | Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
         root = workspace or self.workspace
         user_content = self._build_user_content(current_message, media)
         blocks = list(runtime_context_blocks or ()) if current_role == "user" else []
         merged, runtime_context_meta = append_runtime_context(user_content, blocks)
+        metadata = pin_snapshot_in_metadata(session_metadata)
+        managed_root = managed_skills_path_from_metadata(metadata)
+        replay_history = filter_revoked_skill_history(
+            history,
+            ManagedSkillStore(managed_root) if managed_root is not None else None,
+        )
+        pinned_snapshot = skill_snapshot or snapshot_from_metadata(metadata)
         messages = [
             {
                 "role": "system",
@@ -253,10 +301,11 @@ class ContextBuilder:
                     include_memory_recent_history=include_memory_recent_history,
                     session_key=session_key,
                     unified_session=unified_session,
-                    session_metadata=session_metadata,
+                    session_metadata=metadata,
+                    skill_snapshot=pinned_snapshot,
                 ),
             },
-            *history,
+            *replay_history,
         ]
         if messages[-1].get("role") == current_role:
             last = dict(messages[-1])

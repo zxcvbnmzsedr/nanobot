@@ -60,6 +60,7 @@ from nanobot.webui.http_utils import (
 )
 from nanobot.webui.mcp_presets_api import normalize_mcp_preset_mentions
 from nanobot.webui.memory_ws import webui_memory_event
+from nanobot.webui.skill_market import public_skill_payload, webui_skill_market_event
 from nanobot.webui.transcription_ws import webui_transcription_event
 from nanobot.webui.websocket_logging import websockets_server_logger
 
@@ -84,6 +85,10 @@ class KangarooAuthConfig(Base):
     api_base: str = ""
     llm_proxy_url: str = ""
     memory_api_url: str = ""
+    skill_market_enabled: bool = False
+    skill_market_api_url: str = ""
+    skill_market_poll_interval_s: int = Field(default=300, ge=30, le=3_600)
+    skill_market_public_keys: dict[str, str] = Field(default_factory=dict)
     user_info_path: str = "api/auth/userInfo"
     exchange_path: str = "/api/auth/exchange"
     login_path: str = "/api/auth/login"
@@ -116,7 +121,7 @@ class KangarooAuthConfig(Base):
             raise ValueError("runtime_root must be an absolute path")
         return str(path)
 
-    @field_validator("llm_proxy_url", "memory_api_url")
+    @field_validator("llm_proxy_url", "memory_api_url", "skill_market_api_url")
     @classmethod
     def service_url_format(cls, value: str) -> str:
         value = value.strip()
@@ -135,7 +140,50 @@ class KangarooAuthConfig(Base):
             raise ValueError("kangaroo_auth.llm_proxy_url is required when enabled")
         if self.enabled and not self.memory_api_url:
             raise ValueError("kangaroo_auth.memory_api_url is required when enabled")
+        if self.skill_market_enabled and not self.enabled:
+            raise ValueError("skill_market_enabled requires kangaroo_auth.enabled")
+        if self.skill_market_enabled:
+            market_url = self.skill_market_api_url.strip() or self.api_base.strip()
+            parsed = urlparse(market_url)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.netloc
+                or parsed.username
+                or parsed.password
+                or parsed.path not in {"", "/"}
+                or parsed.params
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError(
+                    "skill marketplace API URL must be an HTTP(S) origin without a path"
+                )
+            if not self.skill_market_public_keys:
+                raise ValueError(
+                    "skill_market_public_keys requires at least one key when enabled"
+                )
         return self
+
+    @field_validator("skill_market_public_keys")
+    @classmethod
+    def skill_market_public_key_format(cls, value: dict[str, str]) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for raw_key_id, raw_public_key in value.items():
+            key_id = raw_key_id.strip()
+            public_key = raw_public_key.strip()
+            if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", key_id) is None:
+                raise ValueError("skill market signing key IDs have an invalid format")
+            if not public_key or len(public_key) > 512:
+                raise ValueError("skill market public keys must be non-empty and bounded")
+            result[key_id] = public_key
+        return result
+
+    @property
+    def resolved_skill_market_api_url(self) -> str:
+        configured = self.skill_market_api_url.strip()
+        if configured:
+            return configured.rstrip("/")
+        return self.api_base.rstrip("/")
 
 
 class WebSocketConfig(Base):
@@ -379,6 +427,8 @@ class WebSocketChannel(BaseChannel):
         self._transcripts = gateway.transcripts
         self._workspaces = gateway.workspaces
         self._memory_client = gateway.memory_client
+        self._skill_market_service = gateway.skill_market_service
+        self._skill_market_unsubscribe: Callable[[], None] | None = None
 
         self._stream_text_buffers: dict[tuple[str, str], list[str]] = {}
 
@@ -578,6 +628,54 @@ class WebSocketChannel(BaseChannel):
             if asyncio.current_task() and asyncio.current_task().cancelling():
                 raise
 
+    async def _start_skill_market_service(self, principal: Principal | None) -> None:
+        if principal is None or self._skill_market_service is None:
+            return
+        try:
+            await self._skill_market_service.start(principal)
+        except Exception:
+            self.logger.exception("Skill marketplace background sync failed to start")
+
+    def _subscribe_skill_market_events(self) -> None:
+        if self._skill_market_service is None or self._skill_market_unsubscribe is not None:
+            return
+        self._skill_market_unsubscribe = self._skill_market_service.subscribe(
+            self._handle_skill_market_service_event
+        )
+
+    def _unsubscribe_skill_market_events(self) -> None:
+        unsubscribe = self._skill_market_unsubscribe
+        self._skill_market_unsubscribe = None
+        if unsubscribe is not None:
+            unsubscribe()
+
+    async def _handle_skill_market_service_event(self, event: dict[str, Any]) -> None:
+        if event.get("type") != "skills_updated":
+            return
+        org_scope = event.get("orgScope", event.get("org_scope"))
+        if not isinstance(org_scope, str) or not org_scope:
+            return
+        public = public_skill_payload(event)
+        if not isinstance(public, dict):
+            return
+        public.pop("type", None)
+        public.pop("orgScope", None)
+        targets = [
+            connection
+            for connection, candidate in list(self._conn_principals.items())
+            if candidate.org_scope == org_scope
+        ]
+        for connection in targets:
+            await self._send_event(connection, "skills_updated", **public)
+
+    async def _stop_skill_market_service(self) -> None:
+        if self._skill_market_service is None:
+            return
+        try:
+            await self._skill_market_service.stop()
+        except Exception:
+            self.logger.exception("Skill marketplace background sync failed to stop")
+
     async def start(self) -> None:
         from nanobot.utils.logging_bridge import redirect_lib_logging
 
@@ -586,11 +684,15 @@ class WebSocketChannel(BaseChannel):
 
         self._running = True
         self._stop_event = asyncio.Event()
+        self._subscribe_skill_market_events()
         if self.gateway.identity_verifier is not None:
             self._credential_refresh_task = asyncio.create_task(
                 self._credential_refresh_loop(),
                 name="kangaroo-credential-refresh",
             )
+        await self._start_skill_market_service(
+            self.gateway.credential_store.instance_principal()
+        )
 
         ssl_context = self._build_ssl_context()
         scheme = "wss" if ssl_context else "ws"
@@ -659,12 +761,15 @@ class WebSocketChannel(BaseChannel):
             await self._server_task
         finally:
             await self._stop_credential_refresh_worker()
+            await self._stop_skill_market_service()
+            self._unsubscribe_skill_market_events()
 
     async def _connection_loop(self, connection: Any) -> None:
         request = connection.request
         path_part = request.path if request else "/"
         _, query = _parse_request_path(path_part)
         principal = self._conn_principals.get(connection)
+        await self._start_skill_market_service(principal)
         client_id_raw = _query_first(query, "client_id")
         client_id = f"kangaroo:{principal.user_id}" if principal else (
             client_id_raw.strip() if client_id_raw else ""
@@ -718,7 +823,7 @@ class WebSocketChannel(BaseChannel):
                 }
                 if tenant_runtime is not None:
                     scope = tenant_runtime.workspace_scope()
-                    metadata[IDENTITY_METADATA_KEY] = tenant_runtime.principal.metadata()
+                    metadata[IDENTITY_METADATA_KEY] = tenant_runtime.identity_metadata()
                     metadata[WORKSPACE_SCOPE_METADATA_KEY] = scope.metadata()
                     self._workspaces.persist_scope(default_chat_id, scope)
                     self._persist_tenant_identity(connection, default_chat_id)
@@ -908,6 +1013,28 @@ class WebSocketChannel(BaseChannel):
             )
             await self._send_event(connection, event, **payload)
             return
+        if t in {
+            "skill_install",
+            "skill_update",
+            "skill_rollback",
+            "skill_uninstall",
+            "skill_set_update_policy",
+            "skill_sync_now",
+        }:
+            principal = self._conn_principals.get(connection)
+            event, payload, broadcast = await webui_skill_market_event(
+                envelope,
+                principal=principal,
+                service=self._skill_market_service,
+            )
+            await self._send_event(connection, event, **payload)
+            if (
+                principal is not None
+                and broadcast is not None
+                and self._skill_market_unsubscribe is None
+            ):
+                await self._broadcast_skills_updated(principal, broadcast)
+            return
         if t == "message":
             cid = envelope.get("chat_id")
             content = envelope.get("content")
@@ -969,7 +1096,7 @@ class WebSocketChannel(BaseChannel):
 
             metadata: dict[str, Any] = {"remote": getattr(connection, "remote_address", None)}
             if runtime is not None:
-                metadata[IDENTITY_METADATA_KEY] = runtime.principal.metadata()
+                metadata[IDENTITY_METADATA_KEY] = runtime.identity_metadata()
             if envelope.get("webui") is True:
                 metadata["webui"] = True
                 metadata.update(self._transcripts.client_turn_metadata(envelope.get("turn_id")))
@@ -1030,6 +1157,8 @@ class WebSocketChannel(BaseChannel):
         if self._stop_event:
             self._stop_event.set()
         await self._stop_credential_refresh_worker()
+        await self._stop_skill_market_service()
+        self._unsubscribe_skill_market_events()
         if self._server_task:
             try:
                 await self._server_task
@@ -1045,6 +1174,20 @@ class WebSocketChannel(BaseChannel):
         self._conn_default.clear()
         self._conn_principals.clear()
         self._tokens.clear()
+
+    async def _broadcast_skills_updated(
+        self,
+        principal: Principal,
+        fields: dict[str, Any],
+    ) -> None:
+        """Notify only authenticated browser connections in the same organization."""
+        targets = [
+            connection
+            for connection, candidate in list(self._conn_principals.items())
+            if candidate.org_scope == principal.org_scope
+        ]
+        for connection in targets:
+            await self._send_event(connection, "skills_updated", **fields)
 
     async def _safe_send_to(self, connection: Any, raw: str, *, label: str = "") -> None:
         """Send a raw frame to one connection, cleaning up on ConnectionClosed."""

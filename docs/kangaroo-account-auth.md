@@ -21,6 +21,13 @@ Configure the WebSocket channel in `~/.nanobot/config.json`:
         "enabled": true,
         "apiBase": "https://api.example.com/",
         "llmProxyUrl": "https://agent.example.com/nanobot/llm/stream",
+        "memoryApiUrl": "https://agent.example.com",
+        "skillMarketEnabled": true,
+        "skillMarketApiUrl": "https://agent.example.com",
+        "skillMarketPollIntervalS": 300,
+        "skillMarketPublicKeys": {
+          "skill-prod-2026-01": "<base64-raw-ed25519-public-key>"
+        },
         "userInfoPath": "api/auth/userInfo",
         "loginPath": "/api/auth/login",
         "logoutPath": "/api/auth/logout",
@@ -121,6 +128,7 @@ Authenticated runtimes use deterministic, hashed directory keys:
     webui/
   organizations/<org-scope>/
     memory/MEMORY.md
+    managed-skills/
 ```
 
 The agent sees memory in this order:
@@ -132,6 +140,10 @@ The agent sees memory in this order:
 The account workspace is always restricted. Account sessions cannot change it to another local
 path. Conversation consolidation and history archive writes go to the user's private memory;
 organization memory is read-only from ordinary account sessions.
+
+Organization-managed Skills share the organization scope, while conversations and user workspace
+data remain private to each employee. See [Managed Skill marketplace](./managed-skill-market.md) for
+the signing, rollout, update-policy, and recovery contracts.
 
 ## Security boundary
 

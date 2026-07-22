@@ -18,6 +18,7 @@ class TenantRuntime:
     workspace: Path
     user_memory: Path
     org_memory: Path
+    managed_skills: Path
     media: Path
     webui: Path
 
@@ -40,6 +41,7 @@ class TenantRuntime:
             "runtime_root": str(self.root),
             "user_memory_path": str(self.user_memory),
             "org_memory_path": str(self.org_memory),
+            "managed_skills_path": str(self.managed_skills),
         }
 
 
@@ -61,6 +63,7 @@ class TenantRuntimeStore:
             workspace=workspace,
             user_memory=user_memory,
             org_memory=org_memory,
+            managed_skills=ensure_dir(org_root / "managed-skills"),
             media=ensure_dir(user_root / "media"),
             webui=ensure_dir(user_root / "webui"),
         )

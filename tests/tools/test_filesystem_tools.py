@@ -297,6 +297,37 @@ class TestListDirTool:
 class TestWorkspaceRestriction:
 
     @pytest.mark.asyncio
+    async def test_workspace_skills_can_be_read_but_not_written(self, tmp_path):
+        workspace = tmp_path / "ws"
+        skill_file = workspace / "skills" / "approved" / "SKILL.md"
+        skill_file.parent.mkdir(parents=True)
+        skill_file.write_text("# Approved\n", encoding="utf-8")
+
+        reader = ReadFileTool(workspace=workspace, skills_read_only=True)
+        writer = WriteFileTool(workspace=workspace, skills_read_only=True)
+
+        read_result = await reader.execute(path="skills/approved/SKILL.md")
+        write_result = await writer.execute(
+            path="skills/new-skill/SKILL.md",
+            content="# New\n",
+        )
+
+        assert "Approved" in read_result
+        assert "read-only" in write_result
+        assert not (workspace / "skills" / "new-skill").exists()
+
+    @pytest.mark.asyncio
+    async def test_workspace_skills_read_only_does_not_block_other_writes(self, tmp_path):
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        writer = WriteFileTool(workspace=workspace, skills_read_only=True)
+
+        result = await writer.execute(path="notes/result.txt", content="ok")
+
+        assert "Successfully wrote" in result
+        assert (workspace / "notes" / "result.txt").read_text(encoding="utf-8") == "ok"
+
+    @pytest.mark.asyncio
     async def test_read_blocked_outside_workspace(self, tmp_path):
         workspace = tmp_path / "ws"
         workspace.mkdir()

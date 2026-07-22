@@ -14,6 +14,9 @@ const updateUrlSpy = vi.fn();
 const attachSpy = vi.fn();
 const getMemorySpy = vi.fn();
 const updateMemorySpy = vi.fn();
+const installSkillSpy = vi.fn().mockResolvedValue({ status: "applied" });
+const uninstallSkillSpy = vi.fn().mockResolvedValue({ status: "applied" });
+const setSkillPolicySpy = vi.fn().mockResolvedValue({ status: "applied" });
 const runStatusHandlers = new Set<(chatId: string, startedAt: number | null) => void>();
 const sessionUpdateHandlers = new Set<(chatId: string, scope?: string) => void>();
 let mockSessions: ChatSummary[] = [];
@@ -214,6 +217,7 @@ vi.mock("@/lib/nanobot-client", () => {
       runStatusHandlers.add(handler);
       return () => runStatusHandlers.delete(handler);
     };
+    onSkillsUpdated = () => () => {};
     getRunStartedAt = () => null;
     getGoalState = () => undefined;
     sendMessage = vi.fn();
@@ -223,6 +227,12 @@ vi.mock("@/lib/nanobot-client", () => {
     updateUrl = updateUrlSpy;
     getMemory = getMemorySpy;
     updateMemory = updateMemorySpy;
+    installSkill = installSkillSpy;
+    updateSkill = vi.fn().mockResolvedValue({ status: "applied" });
+    rollbackSkill = vi.fn().mockResolvedValue({ status: "applied" });
+    uninstallSkill = uninstallSkillSpy;
+    setSkillUpdatePolicy = setSkillPolicySpy;
+    syncSkills = vi.fn().mockResolvedValue({ status: "applied" });
   }
 
   class MemoryRequestError extends Error {
@@ -231,7 +241,18 @@ vi.mock("@/lib/nanobot-client", () => {
     }
   }
 
-  return { MemoryRequestError, NanobotClient: MockClient };
+  class SkillRequestError extends Error {
+    constructor(
+      public readonly status: number,
+      public readonly code: string,
+      public readonly retryable: boolean,
+      detail: string,
+    ) {
+      super(detail);
+    }
+  }
+
+  return { MemoryRequestError, SkillRequestError, NanobotClient: MockClient };
 });
 
 import {
@@ -263,6 +284,9 @@ describe("App layout", () => {
       documents: [],
     });
     updateMemorySpy.mockReset();
+    installSkillSpy.mockReset().mockResolvedValue({ status: "applied" });
+    uninstallSkillSpy.mockReset().mockResolvedValue({ status: "applied" });
+    setSkillPolicySpy.mockReset().mockResolvedValue({ status: "applied" });
     runStatusHandlers.clear();
     sessionUpdateHandlers.clear();
     window.history.replaceState(null, "", "/");
@@ -506,6 +530,163 @@ describe("App layout", () => {
     expect(screen.getByText("Missing CLI")).toBeInTheDocument();
     fireEvent.click(screen.getByText("Raw SKILL.md"));
     expect(screen.getByText(/Use GitHub CLI/)).toBeInTheDocument();
+  });
+
+  it("installs marketplace Skills at row version zero and locks required Skills", async () => {
+    mockFetchRoutes({
+      "/api/settings": baseSettingsPayload(),
+      "/api/webui/skills": { skills: [] },
+      "/api/webui/skill-market": {
+        skills: [
+          {
+            skillKey: "lead-notes",
+            displayName: "Lead Notes",
+            summary: "Summarize sales calls.",
+            publisherId: "kangaroo",
+            latestVersion: "1.0.0",
+          },
+          {
+            skillKey: "quote-policy",
+            displayName: "Quote Policy",
+            summary: "Apply organization quote rules.",
+            mandatory: true,
+            latestVersion: "1.1.0",
+          },
+          {
+            skillKey: "returning-skill",
+            displayName: "Returning Skill",
+            summary: "Previously removed workflow.",
+            publisherId: "kangaroo",
+            latestVersion: "2.0.0",
+            rowVersion: 8,
+          },
+        ],
+      },
+      "/api/webui/skill-market/installed": {
+        subscriptions: [{
+          skillKey: "quote-policy",
+          mandatory: true,
+          updatePolicy: "pinned",
+          rowVersion: 5,
+        }],
+        local: { installed: [{ skillKey: "quote-policy", version: "1.0.0", mandatory: true }] },
+      },
+      "/api/webui/skill-market/status": { enabled: true, available: true },
+      "/api/webui/skill-market/lead-notes": {
+        skillKey: "lead-notes",
+        displayName: "Lead Notes",
+        publisherId: "kangaroo",
+        latestVersion: "1.0.0",
+        signature: { status: "verified" },
+      },
+      "/api/webui/skill-market/quote-policy": {
+        skillKey: "quote-policy",
+        displayName: "Quote Policy",
+        mandatory: true,
+        installed: true,
+        installedVersion: "1.0.0",
+        latestVersion: "1.1.0",
+        updatePolicy: "pinned",
+        rowVersion: 5,
+        versions: [
+          { version: "0.9.0", status: "published" },
+          { version: "0.8.0", status: "revoked" },
+        ],
+      },
+      "/api/webui/skill-market/returning-skill": {
+        skillKey: "returning-skill",
+        displayName: "Returning Skill",
+        publisherId: "kangaroo",
+        latestVersion: "2.0.0",
+        desiredState: "removed",
+        updatePolicy: "notify",
+        rowVersion: 8,
+      },
+    });
+
+    render(<App />);
+    await waitFor(() => expect(connectSpy).toHaveBeenCalled());
+    const sidebar = screen.getByRole("navigation", { name: "Sidebar navigation" });
+    fireEvent.click(within(sidebar).getByRole("button", { name: "Skills" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open details for Lead Notes" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Install" }));
+    await waitFor(() => expect(installSkillSpy).toHaveBeenCalledWith(
+      "lead-notes",
+      { updatePolicy: "manual", expectedRowVersion: 0 },
+    ));
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open details for Returning Skill" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Install" }));
+    await waitFor(() => expect(installSkillSpy).toHaveBeenCalledWith(
+      "returning-skill",
+      { updatePolicy: "notify", expectedRowVersion: 8 },
+    ));
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Installed" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open details for Quote Policy" }));
+    expect(await screen.findByText("Organization required")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Uninstall" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Update policy" })).toBeDisabled();
+    expect(await screen.findByRole("option", { name: "0.9.0" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "0.8.0" })).not.toBeInTheDocument();
+  });
+
+  it("pins an installed marketplace Skill to its current version", async () => {
+    mockFetchRoutes({
+      "/api/settings": baseSettingsPayload(),
+      "/api/webui/skills": { skills: [] },
+      "/api/webui/skill-market": {
+        skills: [{
+          skillKey: "sales-helper",
+          displayName: "Sales Helper",
+          latestVersion: "2.4.0",
+        }],
+      },
+      "/api/webui/skill-market/installed": {
+        subscriptions: [{
+          skillKey: "sales-helper",
+          updatePolicy: "notify",
+          rowVersion: 7,
+        }],
+        local: { installed: [{ skillKey: "sales-helper", version: "2.3.4" }] },
+      },
+      "/api/webui/skill-market/status": { enabled: true, available: true },
+      "/api/webui/skill-market/sales-helper": {
+        skillKey: "sales-helper",
+        displayName: "Sales Helper",
+        installed: true,
+        installedVersion: "2.3.4",
+        latestVersion: "2.4.0",
+        updatePolicy: "notify",
+        rowVersion: 7,
+      },
+    });
+
+    render(<App />);
+    await waitFor(() => expect(connectSpy).toHaveBeenCalled());
+    const sidebar = screen.getByRole("navigation", { name: "Sidebar navigation" });
+    fireEvent.click(within(sidebar).getByRole("button", { name: "Skills" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Installed" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open details for Sales Helper" }));
+
+    const policy = await screen.findByRole("combobox", { name: "Update policy" });
+    fireEvent.change(policy, { target: { value: "pinned" } });
+    await waitFor(() => expect(setSkillPolicySpy).toHaveBeenCalledWith(
+      "sales-helper",
+      "pinned",
+      { version: "2.3.4", expectedRowVersion: 7 },
+    ));
+
+    await waitFor(() => expect(policy).not.toBeDisabled());
+    fireEvent.change(policy, { target: { value: "manual" } });
+    await waitFor(() => expect(setSkillPolicySpy).toHaveBeenLastCalledWith(
+      "sales-helper",
+      "manual",
+      { expectedRowVersion: 7 },
+    ));
   });
 
   it("opens Automations from the main sidebar", async () => {

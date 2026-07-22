@@ -185,6 +185,109 @@ export interface SkillDetail extends SkillSummary {
 
 export interface SkillsPayload { skills: SkillSummary[]; }
 
+export type SkillUpdatePolicy = "manual" | "notify" | "auto_stable" | "pinned";
+
+export interface SkillPublisher {
+  id?: string;
+  name: string;
+  verified?: boolean;
+}
+
+export interface SkillSignature {
+  status?: "verified" | "invalid" | "unknown" | string;
+  verified?: boolean;
+  signer?: string;
+  keyId?: string;
+  digest?: string;
+}
+
+export interface SkillMarketVersion {
+  version: string;
+  changelog?: string;
+  publishedAt?: string;
+  stable?: boolean;
+  revoked?: boolean;
+  status?: "stable" | "revoked" | "disabled" | string;
+}
+
+export interface SkillMarketItem {
+  skillId: string;
+  skillKey?: string;
+  name?: string;
+  displayName?: string;
+  summary?: string;
+  description?: string;
+  category?: string;
+  tags?: string[];
+  publisher?: SkillPublisher | string;
+  publisherId?: string;
+  signature?: SkillSignature;
+  latestVersion?: string;
+  installedVersion?: string;
+  previousVersion?: string;
+  version?: string;
+  changelog?: string;
+  versions?: SkillMarketVersion[];
+  installed?: boolean;
+  required?: boolean;
+  mandatory?: boolean;
+  canManage?: boolean;
+  canUninstall?: boolean;
+  updateAvailable?: boolean;
+  updatePolicy?: SkillUpdatePolicy;
+  rowVersion?: number;
+  status?: string;
+}
+
+export interface SkillMarketPayload {
+  skills: SkillMarketItem[];
+  total?: number;
+  revision?: string;
+}
+
+export interface SkillInventoryPayload extends SkillMarketPayload {
+  snapshotId?: string;
+  desiredRevision?: string;
+  lastSyncedAt?: string;
+}
+
+export interface SkillMarketStatusPayload {
+  enabled: boolean;
+  available: boolean;
+  snapshotId?: string;
+  revision?: string;
+  desiredRevision?: string;
+  lastSyncedAt?: string;
+  nextSyncAt?: string;
+  syncStatus?: string;
+  stale?: boolean;
+  staleSince?: string | null;
+  lastErrorCode?: string | null;
+}
+
+export interface SkillOperationPayload {
+  status?: "applied" | "pending" | "failed" | string;
+  skillId?: string;
+  version?: string;
+  updatePolicy?: SkillUpdatePolicy;
+  revision?: string;
+  desiredRevision?: string;
+  snapshotId?: string;
+  effective?: "next_turn" | string;
+  changed?: boolean | string[];
+  message?: string;
+}
+
+export interface SkillsUpdatedEvent {
+  event: "skills_updated";
+  revision?: string;
+  snapshotId?: string;
+  previousSnapshotId?: string;
+  reason?: string;
+  changed?: string[];
+  skill_id?: string;
+}
+
 /** Structured UI blob on ``progress`` WS frames; channels may add more ``kind`` values later. */
 export interface AgentUIBlob {
   kind: string;
@@ -1102,6 +1205,20 @@ export type InboundEvent =
       status: number;
       detail: string;
     }
+  | {
+      event: "skill_operation_result";
+      request_id: string;
+      payload: SkillOperationPayload;
+    }
+  | {
+      event: "skill_operation_error";
+      request_id?: string;
+      status: number;
+      code: string;
+      detail: string;
+      retryable?: boolean;
+    }
+  | SkillsUpdatedEvent
   | { event: "error"; chat_id?: string; detail?: string; reason?: string };
 
 /** Base64-encoded image attached to an outbound ``message`` envelope.
@@ -1181,6 +1298,36 @@ export type Outbound =
       content: string;
       expectedVersion: number;
     }
+  | {
+      type: "skill_install" | "skill_update";
+      request_id: string;
+      skillId: string;
+      version?: string;
+      updatePolicy?: SkillUpdatePolicy;
+      expectedRowVersion?: number;
+    }
+  | {
+      type: "skill_rollback";
+      request_id: string;
+      skillId: string;
+      version: string;
+      expectedRowVersion?: number;
+    }
+  | {
+      type: "skill_uninstall";
+      request_id: string;
+      skillId: string;
+      expectedRowVersion?: number;
+    }
+  | {
+      type: "skill_set_update_policy";
+      request_id: string;
+      skillId: string;
+      updatePolicy: SkillUpdatePolicy;
+      version?: string;
+      expectedRowVersion?: number;
+    }
+  | { type: "skill_sync_now"; request_id: string }
   | {
       type: "message";
       chat_id: string;

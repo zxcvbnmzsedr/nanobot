@@ -37,6 +37,30 @@ class TestBwrapBackend:
         bind_idx = [i for i, t in enumerate(tokens) if t == "--bind"]
         assert any(tokens[i + 1] == ws and tokens[i + 2] == ws for i in bind_idx)
 
+    def test_workspace_subpath_can_be_mounted_read_only(self, tmp_path):
+        ws = str(tmp_path / "project")
+        skills = str(tmp_path / "project" / "skills")
+        result = wrap_command(
+            "bwrap",
+            "echo hi",
+            ws,
+            ws,
+            read_only_paths=[skills],
+        )
+        tokens = _parse(result)
+
+        workspace_bind = next(
+            i for i, token in enumerate(tokens)
+            if token == "--bind" and tokens[i + 1] == ws and tokens[i + 2] == ws
+        )
+        skills_bind = next(
+            i for i, token in enumerate(tokens)
+            if token == "--ro-bind-try"
+            and tokens[i + 1] == skills
+            and tokens[i + 2] == skills
+        )
+        assert workspace_bind < skills_bind
+
     def test_home_env_points_to_workspace(self, tmp_path):
         ws = str(tmp_path / "project")
         result = wrap_command("bwrap", "echo $HOME", ws, ws)

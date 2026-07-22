@@ -87,3 +87,38 @@ def test_allow_patterns_fullmatch_allows_exact_command():
     tool = ExecTool(allow_patterns=[r"rm\s+-rf\s+/tmp/build"])
     result = tool._guard_command("rm -rf /tmp/build", "/tmp")
     assert result is None
+
+
+def test_skills_read_only_blocks_shell_access_to_workspace_skills():
+    tool = ExecTool(skills_read_only=True)
+
+    result = tool._guard_command("mkdir -p skills/my-skill", "/tmp/workspace")
+
+    assert result is not None
+    assert "skills are read-only" in result.lower()
+
+
+def test_skills_read_only_allows_unrelated_shell_commands():
+    tool = ExecTool(skills_read_only=True)
+
+    assert tool._guard_command("mkdir -p output", "/tmp/workspace") is None
+
+
+def test_skills_read_only_allows_reading_and_executing_skill_resources():
+    tool = ExecTool(skills_read_only=True)
+
+    assert tool._guard_command("cat skills/my-skill/reference.md", "/tmp/workspace") is None
+    assert tool._guard_command(
+        "cat skills/my-skill/reference.md 2>/dev/null",
+        "/tmp/workspace",
+    ) is None
+    assert tool._guard_command("python skills/my-skill/scripts/run.py", "/tmp/workspace") is None
+
+
+def test_skills_read_only_blocks_shell_redirection_to_skill_file():
+    tool = ExecTool(skills_read_only=True)
+
+    result = tool._guard_command("echo content > skills/my-skill/SKILL.md", "/tmp/workspace")
+
+    assert result is not None
+    assert "skills are read-only" in result.lower()

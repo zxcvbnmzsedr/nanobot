@@ -9,6 +9,9 @@ import type {
   ManagedMemoryUpdatePayload,
   MemoryManagementPayload,
   MemoryScopeType,
+  SkillOperationPayload,
+  SkillsUpdatedEvent,
+  SkillUpdatePolicy,
   WorkspaceScopePayload,
 } from "./types";
 import { createHostWebSocket } from "./runtime";
@@ -58,6 +61,10 @@ function summarizeInboundWsPayload(ev: InboundEvent): unknown {
     const row = ev as Extract<InboundEvent, { event: "memory_result" }>;
     return { event: row.event, request_id: row.request_id, payload: "[redacted]" };
   }
+  if (kind === "skill_operation_result") {
+    const row = ev as Extract<InboundEvent, { event: "skill_operation_result" }>;
+    return { event: row.event, request_id: row.request_id, payload: "[redacted]" };
+  }
   if (kind !== "delta" && kind !== "reasoning_delta") return ev;
   const row = { ...(ev as object) } as Record<string, unknown>;
   const text = typeof row.text === "string" ? row.text : "";
@@ -79,6 +86,19 @@ type SessionUpdateHandler = (
   workspaceScope?: WorkspaceScopePayload,
 ) => void;
 type RunStatusHandler = (chatId: string, startedAt: number | null) => void;
+type SkillsUpdatedHandler = (event: SkillsUpdatedEvent) => void;
+type SkillRequestFrame = Extract<
+  Outbound,
+  {
+    type:
+      | "skill_install"
+      | "skill_update"
+      | "skill_rollback"
+      | "skill_uninstall"
+      | "skill_set_update_policy"
+      | "skill_sync_now";
+  }
+>;
 
 /** Structured errors surfaced to the UI.
  *
@@ -113,6 +133,12 @@ interface PendingMemoryRequest {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface PendingSkillRequest {
+  resolve: (payload: unknown) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export class MemoryRequestError extends Error {
   constructor(
     public readonly status: number,
@@ -120,6 +146,18 @@ export class MemoryRequestError extends Error {
   ) {
     super(detail);
     this.name = "MemoryRequestError";
+  }
+}
+
+export class SkillRequestError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    public readonly retryable: boolean,
+    detail: string,
+  ) {
+    super(detail);
+    this.name = "SkillRequestError";
   }
 }
 
@@ -147,6 +185,7 @@ export class NanobotClient {
   private runtimeModelHandlers = new Set<RuntimeModelHandler>();
   private sessionUpdateHandlers = new Set<SessionUpdateHandler>();
   private runStatusHandlers = new Set<RunStatusHandler>();
+  private skillsUpdatedHandlers = new Set<SkillsUpdatedHandler>();
   private errorHandlers = new Set<ErrorHandler>();
   // chat_id -> handlers listening on it
   private chatHandlers = new Map<string, Set<EventHandler>>();
@@ -162,6 +201,7 @@ export class NanobotClient {
   private pendingNewChat: PendingNewChat | null = null;
   private pendingTranscriptions = new Map<string, PendingTranscription>();
   private pendingMemoryRequests = new Map<string, PendingMemoryRequest>();
+  private pendingSkillRequests = new Map<string, PendingSkillRequest>();
   // Frames queued while the socket is not yet OPEN
   private sendQueue: Outbound[] = [];
   private reconnectAttempts = 0;
@@ -228,6 +268,13 @@ export class NanobotClient {
     }
     return () => {
       this.runStatusHandlers.delete(handler);
+    };
+  }
+
+  onSkillsUpdated(handler: SkillsUpdatedHandler): Unsubscribe {
+    this.skillsUpdatedHandlers.add(handler);
+    return () => {
+      this.skillsUpdatedHandlers.delete(handler);
     };
   }
 
@@ -396,6 +443,100 @@ export class NanobotClient {
     );
   }
 
+  installSkill(
+    skillId: string,
+    options: {
+      version?: string;
+      updatePolicy?: SkillUpdatePolicy;
+      expectedRowVersion?: number;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<SkillOperationPayload> {
+    return this.requestSkill({
+      type: "skill_install",
+      request_id: crypto.randomUUID(),
+      skillId,
+      ...(options.version ? { version: options.version } : {}),
+      ...(options.updatePolicy ? { updatePolicy: options.updatePolicy } : {}),
+      expectedRowVersion: options.expectedRowVersion ?? 0,
+    }, options.timeoutMs);
+  }
+
+  updateSkill(
+    skillId: string,
+    options: {
+      version?: string;
+      updatePolicy?: SkillUpdatePolicy;
+      expectedRowVersion?: number;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<SkillOperationPayload> {
+    return this.requestSkill({
+      type: "skill_update",
+      request_id: crypto.randomUUID(),
+      skillId,
+      ...(options.version ? { version: options.version } : {}),
+      ...(options.updatePolicy ? { updatePolicy: options.updatePolicy } : {}),
+      ...(options.expectedRowVersion !== undefined
+        ? { expectedRowVersion: options.expectedRowVersion }
+        : {}),
+    }, options.timeoutMs);
+  }
+
+  rollbackSkill(
+    skillId: string,
+    version: string,
+    options: { expectedRowVersion?: number; timeoutMs?: number } = {},
+  ): Promise<SkillOperationPayload> {
+    return this.requestSkill({
+      type: "skill_rollback",
+      request_id: crypto.randomUUID(),
+      skillId,
+      version,
+      ...(options.expectedRowVersion !== undefined
+        ? { expectedRowVersion: options.expectedRowVersion }
+        : {}),
+    }, options.timeoutMs);
+  }
+
+  uninstallSkill(
+    skillId: string,
+    options: { expectedRowVersion?: number; timeoutMs?: number } = {},
+  ): Promise<SkillOperationPayload> {
+    return this.requestSkill({
+      type: "skill_uninstall",
+      request_id: crypto.randomUUID(),
+      skillId,
+      ...(options.expectedRowVersion !== undefined
+        ? { expectedRowVersion: options.expectedRowVersion }
+        : {}),
+    }, options.timeoutMs);
+  }
+
+  setSkillUpdatePolicy(
+    skillId: string,
+    updatePolicy: SkillUpdatePolicy,
+    options: { version?: string; expectedRowVersion?: number; timeoutMs?: number } = {},
+  ): Promise<SkillOperationPayload> {
+    return this.requestSkill({
+      type: "skill_set_update_policy",
+      request_id: crypto.randomUUID(),
+      skillId,
+      updatePolicy,
+      ...(options.version ? { version: options.version } : {}),
+      ...(options.expectedRowVersion !== undefined
+        ? { expectedRowVersion: options.expectedRowVersion }
+        : {}),
+    }, options.timeoutMs);
+  }
+
+  syncSkills(timeoutMs?: number): Promise<SkillOperationPayload> {
+    return this.requestSkill({
+      type: "skill_sync_now",
+      request_id: crypto.randomUUID(),
+    }, timeoutMs);
+  }
+
   /** Ask the server to create a non-destructive fork before a user-message index. */
   forkChat(
     sourceChatId: string,
@@ -555,6 +696,27 @@ export class NanobotClient {
       return;
     }
 
+    if (parsed.event === "skill_operation_result") {
+      this.resolveSkillRequest(parsed.request_id, parsed.payload);
+      return;
+    }
+
+    if (parsed.event === "skill_operation_error") {
+      this.rejectSkillRequest(
+        parsed.request_id,
+        parsed.status,
+        parsed.code,
+        parsed.retryable === true,
+        parsed.detail || "skill operation failed",
+      );
+      return;
+    }
+
+    if (parsed.event === "skills_updated") {
+      for (const handler of this.skillsUpdatedHandlers) handler(parsed);
+      return;
+    }
+
     if (parsed.event === "session_updated") {
       this.emitSessionUpdate(parsed.chat_id, parsed.scope, parsed.workspace_scope);
       return;
@@ -640,6 +802,7 @@ export class NanobotClient {
     }
     this.rejectAllTranscriptions("socket closed");
     this.rejectAllMemoryRequests(503, "socket closed");
+    this.rejectAllSkillRequests(503, "SOCKET_CLOSED", true, "socket closed");
     // Surface structured reasons *before* reconnect logic so the UI can
     // display the error even while the client transparently reconnects.
     // Browsers populate ``CloseEvent.code`` with the wire-level close code;
@@ -745,6 +908,89 @@ export class NanobotClient {
       pending.reject(new MemoryRequestError(status, detail));
       this.pendingMemoryRequests.delete(requestId);
     }
+  }
+
+  private requestSkill<T extends SkillOperationPayload>(
+    frame: SkillRequestFrame,
+    timeoutMs: number = 60_000,
+  ): Promise<T> {
+    const requestId = frame.request_id;
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingSkillRequests.delete(requestId);
+        this.removeQueuedSkillFrames(requestId);
+        reject(new SkillRequestError(504, "TIMEOUT", true, "skill request timed out"));
+      }, timeoutMs);
+      this.pendingSkillRequests.set(requestId, {
+        resolve: (payload) => resolve(payload as T),
+        reject,
+        timer,
+      });
+      this.queueSend(frame);
+    });
+  }
+
+  private resolveSkillRequest(requestId: string, payload: unknown): void {
+    const pending = this.pendingSkillRequests.get(requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingSkillRequests.delete(requestId);
+    this.removeQueuedSkillFrames(requestId);
+    pending.resolve(payload);
+  }
+
+  private rejectSkillRequest(
+    requestId: string | undefined,
+    status: number,
+    code: string,
+    retryable: boolean,
+    detail: string,
+  ): void {
+    if (!requestId) {
+      this.rejectAllSkillRequests(status, code, retryable, detail);
+      return;
+    }
+    const pending = this.pendingSkillRequests.get(requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingSkillRequests.delete(requestId);
+    this.removeQueuedSkillFrames(requestId);
+    pending.reject(new SkillRequestError(status, code, retryable, detail));
+  }
+
+  private rejectAllSkillRequests(
+    status: number,
+    code: string,
+    retryable: boolean,
+    detail: string,
+  ): void {
+    for (const [requestId, pending] of this.pendingSkillRequests) {
+      clearTimeout(pending.timer);
+      this.removeQueuedSkillFrames(requestId);
+      pending.reject(new SkillRequestError(status, code, retryable, detail));
+      this.pendingSkillRequests.delete(requestId);
+    }
+  }
+
+  private removeQueuedSkillFrames(requestId: string): boolean {
+    let removed = false;
+    for (let index = this.sendQueue.length - 1; index >= 0; index -= 1) {
+      const frame = this.sendQueue[index];
+      if (this.isSkillRequestFrame(frame) && frame.request_id === requestId) {
+        this.sendQueue.splice(index, 1);
+        removed = true;
+      }
+    }
+    return removed;
+  }
+
+  private isSkillRequestFrame(frame: Outbound): frame is SkillRequestFrame {
+    return frame.type === "skill_install"
+      || frame.type === "skill_update"
+      || frame.type === "skill_rollback"
+      || frame.type === "skill_uninstall"
+      || frame.type === "skill_set_update_policy"
+      || frame.type === "skill_sync_now";
   }
 
   private scheduleReconnect(): void {

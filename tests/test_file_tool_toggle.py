@@ -21,6 +21,11 @@ FILE_TOOL_NAMES = {
 def test_file_tools_enabled_by_default():
     assert FileToolsConfig().enable is True
     assert Config().tools.file.enable is True
+    assert Config().tools.skills_read_only is False
+
+
+def test_skills_read_only_accepts_camel_case_config():
+    assert ToolsConfig.model_validate({"skillsReadOnly": True}).skills_read_only is True
 
 
 def test_file_tool_gate_follows_flag():

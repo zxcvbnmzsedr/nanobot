@@ -26,6 +26,7 @@ from nanobot.bus.outbound_events import (
 )
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.websocket import (
+    KangarooAuthConfig,
     WebSocketChannel,
     WebSocketConfig,
     _is_valid_chat_id,
@@ -99,6 +100,82 @@ def _basic_handler(bus: Any, **kw: Any) -> GatewayServices:
         runtime_surface=kw.get("runtime_surface", "browser"),
         runtime_capabilities_overrides=kw.get("runtime_capabilities_overrides"),
     )
+
+
+def _enabled_kangaroo_auth(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "enabled": True,
+        "apiBase": "https://accounts.example",
+        "llmProxyUrl": "https://llm.example/nanobot/llm/stream",
+        "memoryApiUrl": "https://memory.example/nanobot/memory",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_skill_market_auth_requires_key_and_origin_url() -> None:
+    with pytest.raises(ValueError, match="at least one key"):
+        KangarooAuthConfig.model_validate(
+            _enabled_kangaroo_auth(skillMarketEnabled=True)
+        )
+
+    fallback = KangarooAuthConfig.model_validate(
+        _enabled_kangaroo_auth(
+            skillMarketEnabled=True,
+            skillMarketPublicKeys={"key-1": "public-key"},
+        )
+    )
+    assert fallback.resolved_skill_market_api_url == "https://accounts.example"
+
+    explicit = KangarooAuthConfig.model_validate(
+        _enabled_kangaroo_auth(
+            skillMarketEnabled=True,
+            skillMarketApiUrl="https://skills.example/",
+            skillMarketPublicKeys={"key-1": "public-key"},
+        )
+    )
+    assert explicit.resolved_skill_market_api_url == "https://skills.example"
+
+    with pytest.raises(ValueError, match="origin without a path"):
+        KangarooAuthConfig.model_validate(
+            _enabled_kangaroo_auth(
+                skillMarketEnabled=True,
+                skillMarketApiUrl="https://skills.example/control-plane",
+                skillMarketPublicKeys={"key-1": "public-key"},
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_gateway_constructs_an_enabled_skill_market_service(
+    bus: MagicMock,
+    tmp_path: Path,
+) -> None:
+    config = WebSocketConfig.model_validate({
+        "enabled": True,
+        "allowFrom": ["*"],
+        "kangarooAuth": _enabled_kangaroo_auth(
+            runtimeRoot=str(tmp_path / "runtime"),
+            skillMarketEnabled=True,
+            skillMarketPublicKeys={"key-1": "public-key"},
+        ),
+    })
+    gateway = build_gateway_services(
+        config=config,
+        bus=bus,
+        session_manager=None,
+        static_dist_path=None,
+        workspace_path=tmp_path / "workspace",
+        default_restrict_to_workspace=False,
+        runtime_model_name=None,
+        runtime_surface="browser",
+        runtime_capabilities_overrides=None,
+    )
+
+    assert gateway.skill_market_service is not None
+    assert gateway.skill_market_service.settings.enabled is True
+    assert gateway.skill_market_service.settings.base_url == "https://accounts.example"
+    await gateway.skill_market_service.close()
 
 
 @pytest.mark.asyncio
@@ -496,6 +573,139 @@ async def test_memory_envelope_maps_permission_and_conflict_errors(
         (403, "permission_denied"),
         (409, "conflict"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_skill_operation_is_correlated_and_broadcast_only_within_org(
+    bus: MagicMock,
+) -> None:
+    channel = _ch(bus)
+    principal = Principal(user_id="101", org_id="9001")
+    same_org = Principal(user_id="102", org_id="9001")
+    other_org = Principal(user_id="201", org_id="9002")
+    requester = AsyncMock()
+    peer = AsyncMock()
+    outsider = AsyncMock()
+    channel._conn_principals.update({
+        requester: principal,
+        peer: same_org,
+        outsider: other_org,
+    })
+    service = MagicMock()
+    service.install = AsyncMock(return_value={
+        "status": "applied",
+        "skill_key": "sales-helper",
+        "snapshot_id": "snapshot-2",
+        "artifact_url": "https://storage.invalid/private.zip",
+    })
+    channel._skill_market_service = service
+
+    await channel._dispatch_envelope(
+        requester,
+        "kangaroo:101",
+        {
+            "type": "skill_install",
+            "request_id": "skill-1",
+            "skillId": "sales-helper",
+            "updatePolicy": "notify",
+            "expectedRowVersion": 3,
+        },
+    )
+
+    service.install.assert_awaited_once_with(
+        principal,
+        "sales-helper",
+        update_policy="notify",
+        expected_row_version=3,
+    )
+    requester_events = _sent_ws_payloads(requester)
+    assert [event["event"] for event in requester_events] == [
+        "skill_operation_result",
+        "skills_updated",
+    ]
+    assert requester_events[0]["request_id"] == "skill-1"
+    assert requester_events[0]["payload"]["snapshotId"] == "snapshot-2"
+    assert "artifactUrl" not in requester_events[0]["payload"]
+    assert [event["event"] for event in _sent_ws_payloads(peer)] == ["skills_updated"]
+    assert _sent_ws_payloads(outsider) == []
+
+
+@pytest.mark.asyncio
+async def test_skill_pinned_policy_forwards_installed_version(bus: MagicMock) -> None:
+    channel = _ch(bus)
+    principal = Principal(user_id="101", org_id="9001")
+    connection = AsyncMock()
+    channel._conn_principals[connection] = principal
+    service = MagicMock()
+    service.set_policy = AsyncMock(return_value={
+        "status": "applied",
+        "skill_key": "sales-helper",
+        "snapshot_id": "snapshot-3",
+    })
+    channel._skill_market_service = service
+
+    await channel._dispatch_envelope(
+        connection,
+        "kangaroo:101",
+        {
+            "type": "skill_set_update_policy",
+            "request_id": "skill-policy-1",
+            "skillId": "sales-helper",
+            "updatePolicy": "pinned",
+            "version": "1.2.3",
+            "expectedRowVersion": 4,
+        },
+    )
+
+    service.set_policy.assert_awaited_once_with(
+        principal,
+        "sales-helper",
+        update_policy="pinned",
+        version="1.2.3",
+        expected_row_version=4,
+    )
+    assert _sent_ws_payloads(connection)[0]["event"] == "skill_operation_result"
+
+
+@pytest.mark.asyncio
+async def test_skill_background_event_is_broadcast_only_to_matching_org(
+    bus: MagicMock,
+) -> None:
+    channel = _ch(bus)
+    matching = Principal(user_id="101", org_id="9001")
+    same_org = Principal(user_id="102", org_id="9001")
+    other = Principal(user_id="201", org_id="9002")
+    matching_connection = AsyncMock()
+    same_org_connection = AsyncMock()
+    other_connection = AsyncMock()
+    channel._conn_principals.update({
+        matching_connection: matching,
+        same_org_connection: same_org,
+        other_connection: other,
+    })
+
+    await channel._handle_skill_market_service_event({
+        "type": "skills_updated",
+        "orgScope": matching.org_scope,
+        "revision": "g2-o4:digest",
+        "snapshotId": "snapshot-2",
+        "reason": "policy",
+        "changed": [],
+        "skillKey": "sales-helper",
+        "accessToken": "must-not-leak",
+    })
+
+    event = _sent_ws_payloads(matching_connection)[0]
+    assert event == {
+        "event": "skills_updated",
+        "revision": "g2-o4:digest",
+        "snapshotId": "snapshot-2",
+        "reason": "policy",
+        "changed": [],
+        "skillKey": "sales-helper",
+    }
+    assert _sent_ws_payloads(same_org_connection) == [event]
+    assert _sent_ws_payloads(other_connection) == []
 
 
 @pytest.mark.asyncio
@@ -2639,6 +2849,7 @@ async def test_authenticated_legacy_message_persists_default_session_context(
     await channel._connection_loop(connection)
 
     ready_chat = json.loads(connection.sent[0])["chat_id"]
+    runtime = channel.gateway.tenant_runtimes.for_principal(principal)
     saved = sessions.read_session_file(f"websocket:{ready_chat}")
     assert saved is not None
     assert saved["metadata"]["webui"] is True
@@ -2647,7 +2858,22 @@ async def test_authenticated_legacy_message_persists_default_session_context(
     inbound = bus.publish_inbound.await_args.args[0]
     assert inbound.chat_id == ready_chat
     assert inbound.metadata[IDENTITY_METADATA_KEY]["user_id"] == "101"
+    assert (
+        inbound.metadata[IDENTITY_METADATA_KEY]["managed_skills_path"]
+        == str(runtime.managed_skills)
+    )
     assert WORKSPACE_SCOPE_METADATA_KEY in inbound.metadata
+
+    from nanobot.agent.loop import AgentLoop
+
+    request_metadata = AgentLoop._request_metadata(
+        inbound,
+        sessions.get_or_create(f"websocket:{ready_chat}"),
+    )
+    assert (
+        request_metadata[IDENTITY_METADATA_KEY]["managed_skills_path"]
+        == str(runtime.managed_skills)
+    )
 
 
 @pytest.mark.asyncio

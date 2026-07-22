@@ -74,6 +74,21 @@ _WORKSPACE_BOUNDARY_NOTE = (
     "restrict_to_workspace policy and ask how to proceed."
 )
 
+_SKILLS_PATH_PATTERN = re.compile(
+    r"(?:^|[\s'\"/\\])skills(?:$|[\s'\"/\\])",
+    flags=re.IGNORECASE,
+)
+_FILE_MUTATION_PATTERN = re.compile(
+    r"(?:^|[;&|]\s*)(?:mkdir|touch|rm|rmdir|mv|cp|install|truncate|chmod|chown|ln)\b"
+    r"|\b(?:sed|perl)\s+-i\b"
+    r"|\btee\b",
+    flags=re.IGNORECASE,
+)
+_SKILLS_REDIRECT_PATTERN = re.compile(
+    r">>?\s*['\"]?(?:[^;&|\n]*[/\\])?skills(?:$|[/\\])",
+    flags=re.IGNORECASE,
+)
+
 
 class ExecToolConfig(Base):
     """Shell exec tool configuration."""
@@ -188,6 +203,7 @@ class ExecTool(Tool):
             allowed_env_keys=cfg.allowed_env_keys,
             allow_patterns=cfg.allow_patterns,
             deny_patterns=cfg.deny_patterns,
+            skills_read_only=ctx.config.skills_read_only,
         )
 
     def __init__(
@@ -204,6 +220,7 @@ class ExecTool(Tool):
         path_append: str = "",
         allowed_env_keys: list[str] | None = None,
         session_manager: Any | None = None,
+        skills_read_only: bool = False,
     ):
         self.timeout = timeout
         self.working_dir = working_dir
@@ -235,6 +252,7 @@ class ExecTool(Tool):
         self.path_prepend = path_prepend
         self.path_append = path_append
         self.allowed_env_keys = allowed_env_keys or []
+        self.skills_read_only = skills_read_only
         self._session_manager = session_manager or DEFAULT_EXEC_SESSION_MANAGER
 
     @property
@@ -461,7 +479,16 @@ class ExecTool(Tool):
                 )
             else:
                 workspace = workspace_root or cwd
-                command = wrap_command(self.sandbox, command, workspace, cwd)
+                if self.skills_read_only:
+                    command = wrap_command(
+                        self.sandbox,
+                        command,
+                        workspace,
+                        cwd,
+                        read_only_paths=[str(Path(workspace) / "skills")],
+                    )
+                else:
+                    command = wrap_command(self.sandbox, command, workspace, cwd)
                 cwd = str(Path(workspace).resolve())
 
         effective_timeout = self._resolve_timeout(timeout)
@@ -709,6 +736,18 @@ class ExecTool(Tool):
         """Best-effort safety guard for potentially destructive commands."""
         cmd = command.strip()
         lower = cmd.lower()
+
+        if (
+            self.skills_read_only
+            and _SKILLS_PATH_PATTERN.search(cmd)
+            and (
+                _FILE_MUTATION_PATTERN.search(cmd)
+                or _SKILLS_REDIRECT_PATTERN.search(cmd)
+            )
+        ):
+            return ToolResult.error(
+                "Error: Workspace skills are read-only; use the managed Skill Market"
+            )
 
         # allow_patterns take priority over deny_patterns so that users can
         # exempt specific commands (e.g. "rm -rf" inside a build directory)

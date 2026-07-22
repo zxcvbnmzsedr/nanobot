@@ -91,6 +91,7 @@ If a local `nanobot agent` session can already answer normally, you can also ask
 | Open the bundled browser UI | [`webui.md`](./webui.md) | `nanobot webui`, chat workspace, Apps, Skills, Automations, and settings |
 | Connect Telegram, Discord, WeChat, Slack, Email, Mattermost, or another chat app | [`chat-apps.md`](./chat-apps.md) | A gateway-backed chat channel with access control |
 | Use automations | [`automations.md`](./automations.md) | Scheduled automations, local triggers, heartbeat, WebUI management, and delivery behavior |
+| Manage signed organization Skills | [`managed-skill-market.md`](./managed-skill-market.md) | Private catalog, update policies, assignments, signing, and recovery |
 | Use slash commands | [`chat-commands.md`](./chat-commands.md) | Pairing, model presets, local triggers, heartbeat tasks, and chat-side controls |
 | Generate images | [`image-generation.md`](./image-generation.md) | Image provider config, WebUI image mode, and artifact behavior |
 | Run several isolated bots | [`multiple-instances.md`](./multiple-instances.md) | Separate configs, workspaces, ports, and sessions |

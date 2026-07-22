@@ -369,6 +369,7 @@ class ToolsConfig(Base):
         default_factory=lambda: _lazy_default("nanobot.agent.tools.image_generation", "ImageGenerationToolConfig"),
     )
     restrict_to_workspace: bool = False  # policy intent: keep tool access inside workspace when possible
+    skills_read_only: bool = False  # prevent agent tools from creating or modifying workspace skills
     webui_allow_local_service_access: bool = Field(
         default=True,
         validation_alias=AliasChoices(

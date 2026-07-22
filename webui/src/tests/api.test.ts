@@ -16,6 +16,10 @@ import {
   fetchSettingsUsage,
   fetchSidebarState,
   fetchSkillDetail,
+  fetchInstalledSkills,
+  fetchSkillMarket,
+  fetchSkillMarketDetail,
+  fetchSkillMarketStatus,
   fetchSkills,
   fetchWebuiThread,
   fetchWorkspaces,
@@ -252,6 +256,49 @@ describe("webui API helpers", () => {
         headers: { Authorization: "Bearer tok" },
       }),
     );
+  });
+
+  it("fetches and normalizes Skill marketplace routes", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        items: [{ skillKey: "sales-helper", displayName: "Sales Helper" }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        skillKey: "sales-helper",
+        publisher: { name: "Kangaroo" },
+      }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        subscriptions: [{ skillKey: "sales-helper", updatePolicy: "notify" }],
+        local: { installed: [{ skillKey: "sales-helper", version: "1.0.0" }] },
+      }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ enabled: true, available: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+
+    await expect(fetchSkillMarket("tok")).resolves.toMatchObject({
+      skills: [{ skillId: "sales-helper", displayName: "Sales Helper" }],
+    });
+    await expect(fetchSkillMarketDetail("tok", "sales helper")).resolves.toMatchObject({
+      skillId: "sales-helper",
+      publisher: { name: "Kangaroo" },
+    });
+    await expect(fetchInstalledSkills("tok")).resolves.toMatchObject({
+      skills: [{
+        skillId: "sales-helper",
+        installed: true,
+        installedVersion: "1.0.0",
+        updatePolicy: "notify",
+      }],
+    });
+    await expect(fetchSkillMarketStatus("tok")).resolves.toMatchObject({ enabled: true });
+
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => url)).toEqual([
+      "/api/webui/skill-market",
+      "/api/webui/skill-market/sales%20helper",
+      "/api/webui/skill-market/installed",
+      "/api/webui/skill-market/status",
+    ]);
   });
 
   it("percent-encodes websocket keys when deleting a session", async () => {

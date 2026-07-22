@@ -86,7 +86,17 @@ from nanobot.webui.sidebar_state import (
     read_webui_sidebar_state,
     write_webui_sidebar_state,
 )
-from nanobot.webui.skills_api import webui_skill_detail_payload, webui_skills_payload
+from nanobot.webui.skill_market import (
+    SkillMarketServiceProtocol,
+    public_skill_payload,
+    skill_market_read,
+)
+from nanobot.webui.skills_api import (
+    managed_skill_detail_payload,
+    managed_skill_summaries,
+    webui_skill_detail_payload,
+    webui_skills_payload,
+)
 from nanobot.webui.thread_disk import delete_webui_thread
 from nanobot.webui.transcript import (
     build_session_messages_thread_response,
@@ -198,6 +208,7 @@ class GatewayHTTPHandler:
         workspaces: WebUIWorkspaceController,
         skills_workspace_path: Path,
         disabled_skills: set[str] | None = None,
+        skill_market_service: SkillMarketServiceProtocol | None = None,
         cron_service: CronService | None = None,
         local_trigger_store: LocalTriggerStore | None = None,
         cron_pending_job_ids: Callable[[str], set[str]] | None = None,
@@ -220,6 +231,7 @@ class GatewayHTTPHandler:
         self.workspaces = workspaces
         self.skills_workspace_path = skills_workspace_path
         self.disabled_skills = disabled_skills or set()
+        self.skill_market_service = skill_market_service
         self.cron_service = cron_service
         self.local_trigger_store = local_trigger_store
         self.cron_pending_job_ids = cron_pending_job_ids
@@ -1043,10 +1055,19 @@ class GatewayHTTPHandler:
         if got == "/api/workspaces":
             return self._handle_workspaces(connection, request)
         if got == "/api/webui/skills":
-            return self._handle_webui_skills(request)
+            return await self._handle_webui_skills(request)
         m = re.match(r"^/api/webui/skills/([^/]+)$", got)
         if m:
-            return self._handle_webui_skill_detail(request, m.group(1))
+            return await self._handle_webui_skill_detail(request, m.group(1))
+        if got == "/api/webui/skill-market":
+            return await self._handle_skill_market_read(request, "catalog")
+        if got == "/api/webui/skill-market/installed":
+            return await self._handle_skill_market_read(request, "inventory")
+        if got == "/api/webui/skill-market/status":
+            return await self._handle_skill_market_read(request, "status")
+        m = re.match(r"^/api/webui/skill-market/([^/]+)$", got)
+        if m:
+            return await self._handle_skill_market_read(request, "detail", m.group(1))
         if got == "/api/webui/sidebar-state":
             return self._handle_webui_sidebar_state(request)
         if got == "/api/webui/sidebar-state/update":
@@ -1091,17 +1112,29 @@ class GatewayHTTPHandler:
             )
         )
 
-    def _handle_webui_skills(self, request: WsRequest) -> Response:
+    async def _handle_webui_skills(self, request: WsRequest) -> Response:
         if not self.check_api_token(request):
             return _http_error(401, "Unauthorized")
-        return _http_json_response(
-            webui_skills_payload(
-                self.skills_workspace_path,
-                disabled_skills=self.disabled_skills,
-            )
+        principal = self.api_principal(request)
+        workspace_path = (
+            self.tenant_runtimes.for_principal(principal).workspace
+            if principal is not None
+            else self.skills_workspace_path
         )
+        payload = webui_skills_payload(
+            workspace_path,
+            disabled_skills=self.disabled_skills,
+        )
+        if principal is not None and self.skill_market_service is not None:
+            active_entries = self.skill_market_service.active_entries(principal)
+            public_entries = public_skill_payload({"skills": active_entries})
+            if isinstance(public_entries, dict):
+                managed = managed_skill_summaries(public_entries)
+                names = {str(item.get("name")) for item in payload["skills"]}
+                payload["skills"].extend(item for item in managed if item["name"] not in names)
+        return _http_json_response(payload)
 
-    def _handle_webui_skill_detail(self, request: WsRequest, raw_name: str) -> Response:
+    async def _handle_webui_skill_detail(self, request: WsRequest, raw_name: str) -> Response:
         if not self.check_api_token(request):
             return _http_error(401, "Unauthorized")
         from urllib.parse import unquote
@@ -1109,14 +1142,50 @@ class GatewayHTTPHandler:
         name = unquote(raw_name)
         if not name or "/" in name or "\\" in name:
             return _http_error(400, "invalid skill name")
+        principal = self.api_principal(request)
+        workspace_path = (
+            self.tenant_runtimes.for_principal(principal).workspace
+            if principal is not None
+            else self.skills_workspace_path
+        )
         payload = webui_skill_detail_payload(
-            self.skills_workspace_path,
+            workspace_path,
             name,
             disabled_skills=self.disabled_skills,
         )
+        if payload is None and principal is not None and self.skill_market_service is not None:
+            active_entries = self.skill_market_service.active_entries(principal)
+            active_entry = next(
+                (
+                    item
+                    for item in active_entries
+                    if item.get("skillKey", item.get("skill_key")) == name
+                ),
+                None,
+            )
+            public_entry = public_skill_payload(active_entry)
+            if isinstance(public_entry, dict):
+                payload = managed_skill_detail_payload(public_entry)
         if payload is None:
             return _http_error(404, "skill not found")
         return _http_json_response(payload)
+
+    async def _handle_skill_market_read(
+        self,
+        request: WsRequest,
+        operation: str,
+        raw_skill_id: str | None = None,
+    ) -> Response:
+        if not self.check_api_token(request):
+            return _http_error(401, "Unauthorized")
+        skill_id = unquote(raw_skill_id) if raw_skill_id is not None else None
+        status, payload = await skill_market_read(
+            self.skill_market_service,
+            self.api_principal(request),
+            operation,
+            skill_id=skill_id,
+        )
+        return _http_json_response(payload, status=status)
 
     def _handle_webui_sidebar_state(self, request: WsRequest) -> Response:
         if not self.check_api_token(request):
