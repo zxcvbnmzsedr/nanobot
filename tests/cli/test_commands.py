@@ -2415,7 +2415,10 @@ def _patch_serve_runtime(monkeypatch, config: Config, seen: dict[str, object]) -
         def from_config(cls, config, bus=None, **extra):
             return cls(workspace=config.workspace_path, **extra)
         def __init__(self, **kwargs) -> None:
+            from nanobot.agent.tools.registry import ToolRegistry
+
             seen["workspace"] = kwargs["workspace"]
+            self.tools = ToolRegistry()
 
         async def _connect_mcp(self) -> None:
             return None
@@ -2428,11 +2431,15 @@ def _patch_serve_runtime(monkeypatch, config: Config, seen: dict[str, object]) -
         model_name: str,
         request_timeout: float,
         api_key: str = "",
+        api_tools=None,
+        allow_commands: bool = True,
     ):
         seen["agent_loop"] = agent_loop
         seen["model_name"] = model_name
         seen["request_timeout"] = request_timeout
         seen["api_key"] = api_key
+        seen["api_tools"] = api_tools
+        seen["allow_commands"] = allow_commands
         return _FakeApiApp()
 
     def _fake_run_app(api_app, host: str, port: int, print):
@@ -3587,6 +3594,58 @@ def test_serve_uses_api_config_defaults_and_workspace_override(
     assert seen["port"] == 18900
     assert seen["request_timeout"] == 45.0
     assert seen["api_key"] == "secret"
+    assert seen["api_tools"] is None
+    assert seen["allow_commands"] is True
+
+
+def test_api_config_accepts_camel_case_tool_allowlist() -> None:
+    config = Config.model_validate(
+        {
+            "api": {
+                "toolAllowlist": ["list_microgrid_projects", "get_realtime_metrics"],
+                "requireToolAllowlist": True,
+                "allowCommands": False,
+            }
+        }
+    )
+
+    assert config.api.tool_allowlist == [
+        "list_microgrid_projects",
+        "get_realtime_metrics",
+    ]
+    assert config.api.require_tool_allowlist is True
+    assert config.api.allow_commands is False
+
+
+def test_serve_rejects_empty_required_tool_allowlist(monkeypatch, tmp_path: Path) -> None:
+    config_file = _write_instance_config(tmp_path)
+    config = Config()
+    config.api.require_tool_allowlist = True
+    seen: dict[str, object] = {}
+
+    _patch_serve_runtime(monkeypatch, config, seen)
+
+    result = runner.invoke(app, ["serve", "--config", str(config_file)])
+
+    assert result.exit_code == 1
+    assert "api.tool_allowlist must not be empty" in result.stdout
+    assert "api_app" not in seen
+
+
+def test_serve_rejects_missing_allowlisted_tool(monkeypatch, tmp_path: Path) -> None:
+    config_file = _write_instance_config(tmp_path)
+    config = Config()
+    config.api.tool_allowlist = ["missing_microgrid_tool"]
+    seen: dict[str, object] = {}
+
+    _patch_serve_runtime(monkeypatch, config, seen)
+
+    result = runner.invoke(app, ["serve", "--config", str(config_file)])
+
+    assert result.exit_code == 1
+    assert "api.tool_allowlist references unavailable tools" in result.stdout
+    assert "missing_microgrid_tool" in result.stdout
+    assert "api_app" not in seen
 
 
 def test_trigger_cli_queues_message_in_workspace(

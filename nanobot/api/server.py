@@ -1,7 +1,6 @@
-"""OpenAI-compatible HTTP API server for a fixed nanobot session.
+"""OpenAI-compatible HTTP API server for nanobot.
 
-Provides /v1/chat/completions and /v1/models endpoints.
-All requests route to a single persistent API session.
+Provides /v1/chat/completions, /v1/responses, and /v1/models endpoints.
 """
 
 from __future__ import annotations
@@ -12,11 +11,14 @@ import hmac
 import json as _json
 import time
 import uuid
+from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Any
 
 from aiohttp import web
 from loguru import logger
 
+from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.config.paths import get_media_dir
 from nanobot.utils.helpers import safe_filename
 from nanobot.utils.media_decode import (
@@ -34,8 +36,11 @@ __all__ = (
     "MAX_FILE_SIZE",
     "_FileSizeExceeded",
     "_save_base64_data_url",
+    "create_api_tool_registry",
     "create_app",
     "handle_chat_completions",
+    "handle_cancel_response",
+    "handle_responses",
 )
 
 
@@ -44,8 +49,26 @@ API_CHAT_ID = "default"
 _AGENT_LOOP_KEY = web.AppKey[Any]("agent_loop")
 _MODEL_NAME_KEY = web.AppKey[str]("model_name")
 _REQUEST_TIMEOUT_KEY = web.AppKey[float]("request_timeout")
+_API_TOOLS_KEY = web.AppKey[ToolRegistry]("api_tools")
+_API_ALLOW_COMMANDS_KEY = web.AppKey[bool]("api_allow_commands")
 _SESSION_LOCKS_KEY = web.AppKey[dict]("session_locks")
+_RESPONSE_SESSIONS_KEY = web.AppKey[OrderedDict]("response_sessions")
+_ACTIVE_RESPONSE_TASKS_KEY = web.AppKey[dict]("active_response_tasks")
+_MAX_RESPONSE_SESSIONS = 2048
+_STREAM_HEARTBEAT_SECONDS = 1.0
 _MISSING = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _ResponseSession:
+    session_key: str
+    owner_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveResponse:
+    task: asyncio.Task[Any]
+    owner_id: str | None
 
 
 def _app_value(
@@ -61,6 +84,60 @@ def _app_value(
         if default is _MISSING:
             return app[legacy_key]
         return app.get(legacy_key, default)
+
+
+def _api_tool_kwargs(app: Any) -> dict[str, ToolRegistry]:
+    tools = _app_value(app, _API_TOOLS_KEY, "api_tools", None)
+    return {"tools": tools} if tools is not None else {}
+
+
+def _api_command_kwargs(app: Any) -> dict[str, bool]:
+    allow_commands = _app_value(
+        app,
+        _API_ALLOW_COMMANDS_KEY,
+        "api_allow_commands",
+        True,
+    )
+    return {} if allow_commands else {"allow_commands": False}
+
+
+def _trusted_instruction_kwargs(instructions: str | None) -> dict[str, str]:
+    return {"trusted_instructions": instructions} if instructions is not None else {}
+
+
+def create_api_tool_registry(
+    source: ToolRegistry,
+    allowlist: list[str],
+    *,
+    require_allowlist: bool = False,
+) -> ToolRegistry | None:
+    """Create a fail-closed tool registry for API requests.
+
+    An empty allowlist retains the existing unrestricted API behavior. Once an
+    allowlist is configured, every named tool must exist at startup.
+    """
+    if not allowlist and require_allowlist:
+        raise ValueError(
+            "api.tool_allowlist must not be empty when "
+            "api.require_tool_allowlist is enabled"
+        )
+    if not allowlist:
+        return None
+
+    restricted = ToolRegistry()
+    missing: list[str] = []
+    for name in allowlist:
+        tool = source.get(name)
+        if tool is None:
+            missing.append(name)
+        else:
+            restricted.register(tool)
+
+    if missing:
+        raise ValueError(
+            "api.tool_allowlist references unavailable tools: " + ", ".join(missing)
+        )
+    return restricted
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +180,57 @@ def _chat_completion_response(
     }
 
 
+def _responses_response(
+    content: str,
+    model: str,
+    response_id: str,
+    previous_response_id: str | None = None,
+    usage: dict[str, int] | None = None,
+    *,
+    message_id: str | None = None,
+    created_at: int | None = None,
+) -> dict[str, Any]:
+    prompt = (usage or {}).get("prompt_tokens", 0)
+    completion = (usage or {}).get("completion_tokens", 0)
+    total = (usage or {}).get("total_tokens", 0) or prompt + completion
+    return {
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at or int(time.time()),
+        "status": "completed",
+        "error": None,
+        "incomplete_details": None,
+        "model": model,
+        "previous_response_id": previous_response_id,
+        "output": [
+            {
+                "id": message_id or f"msg_{uuid.uuid4().hex}",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": content,
+                        "annotations": [],
+                    }
+                ],
+            }
+        ],
+        "usage": {
+            "input_tokens": prompt,
+            "output_tokens": completion,
+            "total_tokens": total,
+        },
+    }
+
+
+def _responses_sse_event(event: dict[str, Any]) -> bytes:
+    """Encode one Responses API event as an SSE data frame."""
+    payload = _json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+    return f"data: {payload}\n\n".encode()
+
+
 def _response_text(value: Any) -> str:
     """Normalize process_direct output to plain assistant text."""
     if value is None:
@@ -110,6 +238,59 @@ def _response_text(value: Any) -> str:
     if hasattr(value, "content"):
         return str(getattr(value, "content") or "")
     return str(value)
+
+
+def _parse_responses_input(
+    body: dict[str, Any],
+) -> tuple[str, str | None, str | None, str | None, str | None]:
+    """Return content, instructions, previous response, session id, and owner id."""
+    input_value = body.get("input")
+    if isinstance(input_value, str):
+        text = input_value
+    elif isinstance(input_value, list) and len(input_value) == 1:
+        item = input_value[0]
+        if not isinstance(item, dict) or item.get("role") != "user":
+            raise ValueError("Only a single user input message is supported")
+        content = item.get("content")
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            text_parts = [
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") in {"input_text", "text"}
+            ]
+            text = " ".join(text_parts)
+        else:
+            raise ValueError("Invalid input content format")
+    else:
+        raise ValueError("Input must be a string or a single user message")
+
+    if not text.strip():
+        raise ValueError("Input must not be empty")
+
+    instructions = body.get("instructions")
+    if instructions is not None and not isinstance(instructions, str):
+        raise ValueError("Instructions must be a string")
+    trusted_instructions = instructions.strip() if instructions else None
+
+    previous_response_id = body.get("previous_response_id")
+    if previous_response_id is not None and not isinstance(previous_response_id, str):
+        raise ValueError("previous_response_id must be a string")
+
+    metadata = body.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise ValueError("Metadata must be an object")
+    initial_session_id = (metadata or {}).get("session_id")
+    if initial_session_id is not None and not isinstance(initial_session_id, str):
+        raise ValueError("metadata.session_id must be a string")
+    owner_id = (metadata or {}).get("owner_id")
+    if owner_id is not None and (not isinstance(owner_id, str) or not owner_id.strip()):
+        raise ValueError("metadata.owner_id must be a non-empty string")
+
+    if previous_response_id and initial_session_id:
+        raise ValueError("metadata.session_id cannot be used with previous_response_id")
+    return text, trusted_instructions, previous_response_id, initial_session_id, owner_id
 
 # ---------------------------------------------------------------------------
 # SSE helpers
@@ -312,6 +493,8 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                             chat_id=API_CHAT_ID,
                             on_stream=_on_stream,
                             on_stream_end=_on_stream_end,
+                            **_api_command_kwargs(request.app),
+                            **_api_tool_kwargs(request.app),
                         ),
                         timeout=timeout_s,
                     )
@@ -354,6 +537,8 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                         session_key=session_key,
                         channel="api",
                         chat_id=API_CHAT_ID,
+                        **_api_command_kwargs(request.app),
+                        **_api_tool_kwargs(request.app),
                     ),
                     timeout=timeout_s,
                 )
@@ -373,6 +558,368 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
 
     return web.json_response(
         _chat_completion_response(response_text, model_name, getattr(agent_loop, "_last_usage", None))
+    )
+
+
+async def handle_responses(request: web.Request) -> web.Response:
+    """POST /v1/responses - Responses API compatibility with SSE streaming."""
+    try:
+        body = await request.json()
+    except Exception:
+        return _error_json(400, "Invalid JSON body")
+    if not isinstance(body, dict):
+        return _error_json(400, "JSON body must be an object")
+    if body.get("stream") not in (None, False, True):
+        return _error_json(400, "stream must be a boolean")
+    stream = body.get("stream") is True
+
+    model_name: str = _app_value(request.app, _MODEL_NAME_KEY, "model_name", "nanobot")
+    requested_model = body.get("model")
+    if requested_model and requested_model != model_name:
+        return _error_json(400, f"Only configured model '{model_name}' is available")
+
+    try:
+        (
+            text,
+            trusted_instructions,
+            previous_response_id,
+            initial_session_id,
+            requested_owner_id,
+        ) = _parse_responses_input(body)
+    except ValueError as exc:
+        return _error_json(400, str(exc))
+
+    response_sessions: OrderedDict[str, _ResponseSession] = _app_value(
+        request.app,
+        _RESPONSE_SESSIONS_KEY,
+        "response_sessions",
+    )
+    if previous_response_id:
+        previous_session = response_sessions.get(previous_response_id)
+        if previous_session is None:
+            return _error_json(400, "Unknown previous_response_id")
+        if (
+            previous_session.owner_id is not None
+            and requested_owner_id != previous_session.owner_id
+        ):
+            return _error_json(403, "Response does not belong to this owner")
+        session_key = previous_session.session_key
+        owner_id = previous_session.owner_id
+        response_sessions.move_to_end(previous_response_id)
+    else:
+        session_id = initial_session_id or uuid.uuid4().hex
+        session_key = f"api:{session_id}"
+        owner_id = requested_owner_id
+
+    agent_loop = _app_value(request.app, _AGENT_LOOP_KEY, "agent_loop")
+    timeout_s: float = _app_value(
+        request.app,
+        _REQUEST_TIMEOUT_KEY,
+        "request_timeout",
+        120.0,
+    )
+    session_locks: dict[str, asyncio.Lock] = _app_value(
+        request.app,
+        _SESSION_LOCKS_KEY,
+        "session_locks",
+    )
+    session_lock = session_locks.setdefault(session_key, asyncio.Lock())
+
+    logger.info(
+        "Responses API request session_key={} previous_response_id={} text={} stream={}",
+        session_key,
+        previous_response_id,
+        text[:80],
+        stream,
+    )
+
+    if stream:
+        response_id = f"resp_{uuid.uuid4().hex}"
+        message_id = f"msg_{uuid.uuid4().hex}"
+        created_at = int(time.time())
+        sequence_number = 0
+        resp = web.StreamResponse(
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+        )
+        await resp.prepare(request)
+
+        initial_response = _responses_response(
+            "",
+            model_name,
+            response_id,
+            previous_response_id,
+            message_id=message_id,
+            created_at=created_at,
+        )
+        initial_response["status"] = "in_progress"
+        initial_response["output"] = []
+        initial_response["usage"] = None
+
+        async def _write_event(event: dict[str, Any]) -> None:
+            nonlocal sequence_number
+            event["sequence_number"] = sequence_number
+            sequence_number += 1
+            await resp.write(_responses_sse_event(event))
+
+        await _write_event({"type": "response.created", "response": initial_response})
+        await _write_event({"type": "response.in_progress", "response": initial_response})
+        await _write_event(
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": message_id,
+                    "type": "message",
+                    "status": "in_progress",
+                    "role": "assistant",
+                    "content": [],
+                },
+            }
+        )
+        await _write_event(
+            {
+                "type": "response.content_part.added",
+                "item_id": message_id,
+                "output_index": 0,
+                "content_index": 0,
+                "part": {"type": "output_text", "text": "", "annotations": []},
+            }
+        )
+
+        queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
+        emitted_content = False
+
+        async def _on_stream(token: str) -> None:
+            nonlocal emitted_content
+            if token:
+                emitted_content = True
+                await queue.put(("delta", token))
+
+        async def _on_stream_end(*_a: Any, **_kw: Any) -> None:
+            return None
+
+        async def _run() -> None:
+            try:
+                async with session_lock:
+                    response = await asyncio.wait_for(
+                        agent_loop.process_direct(
+                            content=text,
+                            media=None,
+                            session_key=session_key,
+                            channel="api",
+                            chat_id=API_CHAT_ID,
+                            on_stream=_on_stream,
+                            on_stream_end=_on_stream_end,
+                            **_api_command_kwargs(request.app),
+                            **_trusted_instruction_kwargs(trusted_instructions),
+                            **_api_tool_kwargs(request.app),
+                        ),
+                        timeout=timeout_s,
+                    )
+                    response_text = _response_text(response)
+                    if not response_text or not response_text.strip():
+                        logger.warning("Empty response for session {}, using fallback", session_key)
+                        response_text = EMPTY_FINAL_RESPONSE_MESSAGE
+                    if not emitted_content:
+                        await queue.put(("delta", response_text))
+                    await queue.put(("complete", response_text))
+            except asyncio.TimeoutError:
+                logger.warning("Responses stream timed out for session {}", session_key)
+                await queue.put(("error", f"Request timed out after {timeout_s}s"))
+            except Exception:
+                logger.exception("Streaming Responses error for session {}", session_key)
+                await queue.put(("error", "Internal server error"))
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(_run())
+        active_response_tasks: dict[str, _ActiveResponse] = _app_value(
+            request.app,
+            _ACTIVE_RESPONSE_TASKS_KEY,
+            "active_response_tasks",
+        )
+        active_response_tasks[response_id] = _ActiveResponse(task, owner_id)
+        streamed_text = ""
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=_STREAM_HEARTBEAT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    # Keep intermediary proxies active and detect clients that
+                    # disconnect while the agent is still executing tools.
+                    await resp.write(b": keep-alive\n\n")
+                    continue
+                if item is None:
+                    break
+                kind, value = item
+                if kind == "delta":
+                    streamed_text += value
+                    await _write_event(
+                        {
+                            "type": "response.output_text.delta",
+                            "item_id": message_id,
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": value,
+                            "logprobs": [],
+                        }
+                    )
+                elif kind == "error":
+                    await _write_event(
+                        {
+                            "type": "error",
+                            "code": "request_timeout" if value.startswith("Request timed out") else "server_error",
+                            "message": value,
+                            "param": None,
+                        }
+                    )
+                else:
+                    final_text = streamed_text or value
+                    completed_response = _responses_response(
+                        final_text,
+                        model_name,
+                        response_id,
+                        previous_response_id,
+                        getattr(agent_loop, "_last_usage", None),
+                        message_id=message_id,
+                        created_at=created_at,
+                    )
+                    await _write_event(
+                        {
+                            "type": "response.output_text.done",
+                            "item_id": message_id,
+                            "output_index": 0,
+                            "content_index": 0,
+                            "text": final_text,
+                            "logprobs": [],
+                        }
+                    )
+                    await _write_event(
+                        {
+                            "type": "response.content_part.done",
+                            "item_id": message_id,
+                            "output_index": 0,
+                            "content_index": 0,
+                            "part": {
+                                "type": "output_text",
+                                "text": final_text,
+                                "annotations": [],
+                            },
+                        }
+                    )
+                    await _write_event(
+                        {
+                            "type": "response.output_item.done",
+                            "output_index": 0,
+                            "item": completed_response["output"][0],
+                        }
+                    )
+                    response_sessions[response_id] = _ResponseSession(session_key, owner_id)
+                    response_sessions.move_to_end(response_id)
+                    while len(response_sessions) > _MAX_RESPONSE_SESSIONS:
+                        response_sessions.popitem(last=False)
+                    await _write_event(
+                        {"type": "response.completed", "response": completed_response}
+                    )
+        except (ConnectionAbortedError, ConnectionResetError):
+            logger.info("Responses stream disconnected for session {}", session_key)
+        finally:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            active_response = active_response_tasks.get(response_id)
+            if active_response is not None and active_response.task is task:
+                active_response_tasks.pop(response_id, None)
+        return resp
+
+    try:
+        async with session_lock:
+            response = await asyncio.wait_for(
+                agent_loop.process_direct(
+                    content=text,
+                    media=None,
+                    session_key=session_key,
+                    channel="api",
+                    chat_id=API_CHAT_ID,
+                    **_api_command_kwargs(request.app),
+                    **_trusted_instruction_kwargs(trusted_instructions),
+                    **_api_tool_kwargs(request.app),
+                ),
+                timeout=timeout_s,
+            )
+            response_text = _response_text(response)
+            if not response_text or not response_text.strip():
+                logger.warning("Empty response for session {}, using fallback", session_key)
+                response_text = EMPTY_FINAL_RESPONSE_MESSAGE
+    except asyncio.TimeoutError:
+        return _error_json(504, f"Request timed out after {timeout_s}s")
+    except Exception:
+        logger.exception("Error processing Responses request for session {}", session_key)
+        return _error_json(500, "Internal server error", err_type="server_error")
+
+    response_id = f"resp_{uuid.uuid4().hex}"
+    response_sessions[response_id] = _ResponseSession(session_key, owner_id)
+    response_sessions.move_to_end(response_id)
+    while len(response_sessions) > _MAX_RESPONSE_SESSIONS:
+        response_sessions.popitem(last=False)
+
+    return web.json_response(
+        _responses_response(
+            response_text,
+            model_name,
+            response_id,
+            previous_response_id,
+            getattr(agent_loop, "_last_usage", None),
+        )
+    )
+
+
+async def handle_cancel_response(request: web.Request) -> web.Response:
+    """Cancel an active Responses API task by response id."""
+    response_id = request.match_info["response_id"]
+    active_response_tasks: dict[str, _ActiveResponse] = _app_value(
+        request.app,
+        _ACTIVE_RESPONSE_TASKS_KEY,
+        "active_response_tasks",
+    )
+    active_response = active_response_tasks.get(response_id)
+    if active_response is None or active_response.task.done():
+        return _error_json(404, "Active response not found")
+
+    owner_id: str | None = None
+    raw_body = await request.read()
+    if raw_body:
+        try:
+            body = _json.loads(raw_body)
+        except (TypeError, ValueError):
+            return _error_json(400, "Invalid JSON body")
+        if not isinstance(body, dict):
+            return _error_json(400, "JSON body must be an object")
+        owner_id = body.get("owner_id")
+        if owner_id is not None and (not isinstance(owner_id, str) or not owner_id.strip()):
+            return _error_json(400, "owner_id must be a non-empty string")
+    if active_response.owner_id is not None and owner_id != active_response.owner_id:
+        return _error_json(403, "Response does not belong to this owner")
+
+    task = active_response.task
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    return web.json_response(
+        {
+            "id": response_id,
+            "object": "response",
+            "status": "cancelled",
+        }
     )
 
 
@@ -409,6 +956,8 @@ def create_app(
     model_name: str = "nanobot",
     request_timeout: float = 120.0,
     api_key: str = "",
+    api_tools: ToolRegistry | None = None,
+    allow_commands: bool = True,
 ) -> web.Application:
     """Create the aiohttp application.
 
@@ -417,12 +966,19 @@ def create_app(
         model_name: Model name reported in responses.
         request_timeout: Per-request timeout in seconds.
         api_key: Optional API key for Bearer-token authentication on API routes.
+        api_tools: Optional restricted registry used by every agent API route.
+        allow_commands: Whether API messages may invoke Nanobot slash commands.
     """
     app = web.Application(client_max_size=20 * 1024 * 1024)  # 20MB for base64 images
     app[_AGENT_LOOP_KEY] = agent_loop
     app[_MODEL_NAME_KEY] = model_name
     app[_REQUEST_TIMEOUT_KEY] = request_timeout
+    if api_tools is not None:
+        app[_API_TOOLS_KEY] = api_tools
+    app[_API_ALLOW_COMMANDS_KEY] = allow_commands
     app[_SESSION_LOCKS_KEY] = {}  # per-user locks, keyed by session_key
+    app[_RESPONSE_SESSIONS_KEY] = OrderedDict()
+    app[_ACTIVE_RESPONSE_TASKS_KEY] = {}
 
     @web.middleware
     async def auth_middleware(request: web.Request, handler) -> web.StreamResponse:
@@ -441,6 +997,8 @@ def create_app(
     app.middlewares.append(auth_middleware)
 
     app.router.add_post("/v1/chat/completions", handle_chat_completions)
+    app.router.add_post("/v1/responses", handle_responses)
+    app.router.add_post("/v1/responses/{response_id}/cancel", handle_cancel_response)
     app.router.add_get("/v1/models", handle_models)
     app.router.add_get("/health", handle_health)
     return app

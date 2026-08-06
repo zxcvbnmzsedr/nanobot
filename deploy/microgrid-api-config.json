@@ -1,0 +1,45 @@
+{
+  "providers": {
+    "openai": {
+      "apiKey": "${MICROGRID_LLM_API_KEY}",
+      "apiBase": "${MICROGRID_LLM_API_BASE}",
+      "apiType": "responses"
+    }
+  },
+  "modelPresets": {
+    "microgrid": {
+      "provider": "openai",
+      "model": "${MICROGRID_AGENT_MODEL}",
+      "maxTokens": 8192,
+      "contextWindowTokens": 200000,
+      "temperature": 0.1
+    }
+  },
+  "agents": {
+    "defaults": {
+      "modelPreset": "microgrid"
+    }
+  },
+  "api": {
+    "host": "0.0.0.0",
+    "port": 8900,
+    "apiKey": "${MICROGRID_AGENT_NANOBOT_API_KEY}",
+    "allowCommands": false,
+    "requireToolAllowlist": true,
+    "toolAllowlist": [
+      "list_microgrid_projects",
+      "get_project_snapshot",
+      "get_realtime_metrics",
+      "get_recent_alarms",
+      "get_device_metric_schema",
+      "query_device_metrics_sql"
+    ]
+  },
+  "tools": {
+    "restrictToWorkspace": true,
+    "ssrfWhitelist": [
+      "${MICROGRID_BACKEND_PRIMARY_CIDR}",
+      "${MICROGRID_BACKEND_SECONDARY_CIDR}"
+    ]
+  }
+}

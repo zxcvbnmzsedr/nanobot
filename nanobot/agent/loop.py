@@ -172,6 +172,8 @@ class TurnContext:
     hook_factories: list[AgentTurnHookFactory] = field(default_factory=list)
     turn_scopes: list[AbstractContextManager[Any]] = field(default_factory=list)
     tools: ToolRegistry | None = None
+    trusted_instructions: str | None = None
+    allow_commands: bool = True
 
     turn_wall_started_at: float = field(default_factory=time.time)
     visible_run_started_at: float | None = None
@@ -702,7 +704,7 @@ class AgentLoop:
         """Build the initial message list for the LLM turn."""
         assert ctx.session is not None
         scope = self.workspace_scopes.for_message(ctx.msg, ctx.session.metadata)
-        return self.context.build_messages(
+        messages = self.context.build_messages(
             history=ctx.history,
             current_message=ctx.msg.content,
             media=ctx.msg.media if ctx.kind is TurnKind.USER and ctx.msg.media else None,
@@ -720,6 +722,14 @@ class AgentLoop:
             session_key=ctx.session.key,
             unified_session=self._unified_session,
         )
+        if ctx.trusted_instructions:
+            system_message = dict(messages[0])
+            system_message["content"] = (
+                f"{system_message.get('content', '')}\n\n"
+                f"# Request Instructions\n\n{ctx.trusted_instructions}"
+            )
+            messages[0] = system_message
+        return messages
 
     def _request_context_for_turn(self, ctx: TurnContext) -> RequestContext:
         assert ctx.session is not None
@@ -1272,6 +1282,8 @@ class AgentLoop:
         hooks: list[AgentHook] | None = None,
         hook_factories: list[AgentTurnHookFactory] | None = None,
         tools: ToolRegistry | None = None,
+        trusted_instructions: str | None = None,
+        allow_commands: bool = True,
         runtime: LLMRuntime | None = None,
         delivery: TurnDelivery | None = None,
         on_runtime_admitted: Callable[[LLMRuntime], Awaitable[None]] | None = None,
@@ -1323,6 +1335,8 @@ class AgentLoop:
             hooks=list(hooks or []),
             hook_factories=list(hook_factories or []),
             tools=tools,
+            trusted_instructions=trusted_instructions,
+            allow_commands=allow_commands,
         )
         # A streaming callback may be present even when the final text comes from a
         # non-streaming recovery. Only the last completed segment can suppress the
@@ -1483,7 +1497,7 @@ class AgentLoop:
         return "ok"
 
     async def _state_command(self, ctx: TurnContext) -> str:
-        if ctx.kind is TurnKind.SYSTEM:
+        if ctx.kind is TurnKind.SYSTEM or not ctx.allow_commands:
             return "dispatch"
         raw = ctx.msg.content.strip()
         _, automation_metadata = automation_history_overrides(ctx.msg.metadata)
@@ -1940,6 +1954,8 @@ class AgentLoop:
         hooks: list[AgentHook] | None = None,
         hook_factories: list[AgentTurnHookFactory] | None = None,
         tools: ToolRegistry | None = None,
+        trusted_instructions: str | None = None,
+        allow_commands: bool = True,
         persist_user_message: bool = True,
         runtime: LLMRuntime | None = None,
         on_runtime_admitted: Callable[[LLMRuntime], Awaitable[None]] | None = None,
@@ -1974,6 +1990,10 @@ class AgentLoop:
                     kwargs["hook_factories"] = hook_factories
                 if tools is not None:
                     kwargs["tools"] = tools
+                if trusted_instructions is not None:
+                    kwargs["trusted_instructions"] = trusted_instructions
+                if not allow_commands:
+                    kwargs["allow_commands"] = False
                 if runtime is not None:
                     kwargs["runtime"] = runtime
                 if on_runtime_admitted is not None:

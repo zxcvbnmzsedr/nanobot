@@ -4,6 +4,7 @@ x-common-config: &common-config
     dockerfile: Dockerfile
     args:
       NANOBOT_CHANNELS: ${NANOBOT_CHANNELS:-whatsapp}
+      NANOBOT_EXTRAS: ${NANOBOT_EXTRAS:-api}
   volumes:
     - ~/.nanobot:/home/nanobot/.nanobot
   cap_drop:
@@ -31,7 +32,18 @@ services:
     container_name: nanobot-api
     <<: *common-config
     command:
-      ["serve", "--host", "0.0.0.0", "-w", "/home/nanobot/.nanobot/api-workspace"]
+      ["serve", "--config", "/app/deploy/microgrid-api-config.json", "-w", "/home/nanobot/.nanobot/api-workspace"]
+    environment:
+      MICROGRID_AGENT_MODEL: ${MICROGRID_AGENT_MODEL:-gpt-5.6-terra}
+      MICROGRID_AGENT_NANOBOT_API_KEY: ${MICROGRID_AGENT_NANOBOT_API_KEY:?Set MICROGRID_AGENT_NANOBOT_API_KEY}
+      MICROGRID_AGENT_SERVICE_TOKEN: ${MICROGRID_AGENT_SERVICE_TOKEN:?Set MICROGRID_AGENT_SERVICE_TOKEN}
+      MICROGRID_BACKEND_URL: ${MICROGRID_BACKEND_URL:-http://host.docker.internal:48080}
+      MICROGRID_BACKEND_PRIMARY_CIDR: ${MICROGRID_BACKEND_PRIMARY_CIDR:-172.16.0.0/12}
+      MICROGRID_BACKEND_SECONDARY_CIDR: ${MICROGRID_BACKEND_SECONDARY_CIDR:-192.168.0.0/16}
+      MICROGRID_LLM_API_BASE: ${MICROGRID_LLM_API_BASE:-https://www.shiyitopo.tech/v1}
+      MICROGRID_LLM_API_KEY: ${MICROGRID_LLM_API_KEY:?Set MICROGRID_LLM_API_KEY}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     ports:
       - 127.0.0.1:8900:8900

@@ -41,6 +41,11 @@ COPY scripts/install_channel_dependencies.py scripts/
 COPY --from=webui-builder /app/nanobot/web/dist/ nanobot/web/dist/
 RUN NANOBOT_SKIP_WEBUI_BUILD=1 uv pip install --python "$VIRTUAL_ENV/bin/python" --no-cache .
 
+# Install the read-only microgrid tool plugin into the same environment. Its
+# nanobot.tools entry points are discovered when the API registry starts.
+COPY extensions/microgrid-tools/ extensions/microgrid-tools/
+RUN uv pip install --python "$VIRTUAL_ENV/bin/python" --no-cache ./extensions/microgrid-tools
+
 # Preinstall selected channel dependencies from their manifests. A comma-separated
 # list keeps the image configurable while preserving WhatsApp in the default image.
 ARG NANOBOT_CHANNELS=whatsapp
@@ -53,6 +58,7 @@ RUN for channel in $(printf '%s' "$NANOBOT_CHANNELS" | tr ',' ' '); do \
 # at startup). Lives in the code dir (/app), not the data dir, so a mounted disk
 # won't shadow it. Only used when RENDER=true; ignored by local runs.
 COPY render-config.json ./
+COPY deploy/microgrid-api-config.json deploy/microgrid-api-config.json
 
 # Create the non-root user and hand ownership of the writable virtualenv to it.
 RUN useradd -m -u 1000 -s /bin/bash nanobot && \

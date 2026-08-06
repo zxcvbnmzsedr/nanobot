@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nanobot-microgrid-tools"
+version = "0.1.0"
+description = "Read-only microgrid data tools for nanobot"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0,<1.0.0",
+    "nanobot-ai>=0.3.0",
+]
+
+[project.entry-points."nanobot.tools"]
+microgrid_projects = "nanobot_microgrid_tools.tools:AuthorizedProjectsTool"
+microgrid_snapshot = "nanobot_microgrid_tools.tools:ProjectSnapshotTool"
+microgrid_realtime_metrics = "nanobot_microgrid_tools.tools:RealtimeMetricsTool"
+microgrid_recent_alarms = "nanobot_microgrid_tools.tools:RecentAlarmsTool"
+microgrid_metric_schema = "nanobot_microgrid_tools.tools:DeviceMetricSchemaTool"
+microgrid_metric_sql = "nanobot_microgrid_tools.tools:DeviceMetricSqlTool"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nanobot_microgrid_tools"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]

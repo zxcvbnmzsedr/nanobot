@@ -1327,14 +1327,14 @@ def serve(
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
-    """Start the OpenAI-compatible API server (/v1/chat/completions)."""
+    """Start the OpenAI-compatible API server."""
     try:
         from aiohttp import web  # noqa: F401
     except ImportError:
         console.print("[red]aiohttp is required. Install with: nanobot plugins enable api[/red]")
         raise typer.Exit(1)
 
-    from nanobot.api.server import create_app
+    from nanobot.api.server import create_api_tool_registry, create_app
     from nanobot.bus.queue import MessageBus
     from nanobot.providers.image_generation import image_gen_provider_configs
     from nanobot.session.manager import SessionManager
@@ -1367,12 +1367,28 @@ def serve(
         console.print(f"[red]Error: {exc}[/red]")
         raise typer.Exit(1) from exc
 
+    try:
+        api_tools = create_api_tool_registry(
+            agent_loop.tools,
+            api_cfg.tool_allowlist,
+            require_allowlist=api_cfg.require_tool_allowlist,
+        )
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
     model_name, preset_tag = _model_display(runtime_config)
     console.print(f"{__logo__} Starting OpenAI-compatible API server")
-    console.print(f"  [cyan]Endpoint[/cyan] : http://{host}:{port}/v1/chat/completions")
+    console.print(f"  [cyan]Responses[/cyan] : http://{host}:{port}/v1/responses")
+    console.print(f"  [cyan]Chat[/cyan]      : http://{host}:{port}/v1/chat/completions")
     console.print(f"  [cyan]Model[/cyan]    : {model_name}{preset_tag}")
     console.print("  [cyan]Session[/cyan]  : api:default")
     console.print(f"  [cyan]Timeout[/cyan]  : {timeout}s")
+    if api_tools is not None:
+        console.print(f"  [cyan]API tools[/cyan]: {', '.join(api_tools.tool_names)}")
+    console.print(
+        f"  [cyan]API commands[/cyan]: {'enabled' if api_cfg.allow_commands else 'disabled'}"
+    )
     if not is_loopback_host(host):
         console.print(
             "[yellow]API is available beyond this device "
@@ -1383,6 +1399,8 @@ def serve(
     api_app = create_app(
         agent_loop, model_name=model_name, request_timeout=timeout,
         api_key=api_key,
+        api_tools=api_tools,
+        allow_commands=api_cfg.allow_commands,
     )
 
     async def on_startup(_app):

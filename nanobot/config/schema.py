@@ -327,6 +327,21 @@ class ApiConfig(Base):
     port: int = 8900
     timeout: float = 120.0  # Per-request timeout in seconds.
     api_key: str = Field(default="", repr=False)
+    tool_allowlist: list[str] = Field(default_factory=list)
+    require_tool_allowlist: bool = False
+    allow_commands: bool = True
+
+    @field_validator("tool_allowlist")
+    @classmethod
+    def validate_tool_allowlist(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for raw_name in value:
+            name = raw_name.strip()
+            if not name:
+                raise ValueError("api.tool_allowlist entries must not be empty")
+            if name not in normalized:
+                normalized.append(name)
+        return normalized
 
     @model_validator(mode="after")
     def wildcard_host_requires_auth(self) -> "ApiConfig":
