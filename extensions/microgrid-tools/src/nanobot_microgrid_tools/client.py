@@ -69,8 +69,10 @@ class MicrogridClient:
         resource: str,
         context: MicrogridRequestContext,
         project_id: str,
+        *,
+        params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return await self._request("GET", resource, context, project_id=project_id)
+        return await self._request("GET", resource, context, project_id=project_id, params=params)
 
     async def post(
         self,
@@ -88,6 +90,7 @@ class MicrogridClient:
         context: MicrogridRequestContext,
         payload: dict[str, Any] | None = None,
         project_id: str | None = None,
+        params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if project_id is None:
             url = f"{self.base_url}/internal-api/agent/projects/{resource}"
@@ -115,7 +118,9 @@ class MicrogridClient:
             timeout=self.timeout,
             trust_env=False,
         ) as client:
-            response = await client.request(method, url, headers=headers, json=payload)
+            response = await client.request(
+                method, url, headers=headers, json=payload, params=params,
+            )
             response.raise_for_status()
             payload = response.json()
 

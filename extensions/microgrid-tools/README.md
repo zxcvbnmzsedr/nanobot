@@ -100,7 +100,7 @@ subqueries, comments, parameters, unsafe functions, and access to any other tabl
 Example:
 
 ```sql
-SELECT ts, "battery_soc"
+SELECT ts, "1#6003"
 FROM device_metrics
 WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '1 hour'
 ORDER BY ts DESC
@@ -110,3 +110,23 @@ LIMIT 100
 This package contains no shell, file-write, command preparation, or device execution tool.
 Natural-language control must be added later as a Java-validated, user-confirmed workflow; it
 must not be implemented as a direct Nanobot execution tool.
+
+## Versioned point definitions
+
+All projects now use the supplied `2026-10-07-v1` point table (295 definitions).
+`get_device_metric_schema` accepts `search`, for example `SOC` or `3#551`.
+It returns exact identifiers, names, source rows, units, conversion status and
+whether the current device actually has each column. Refresh definitions each
+turn; historical columns outside the supplied table are not queryable.
+
+`get_realtime_metrics` accepts up to 50 `identifiers`. Select only the points
+needed for the question. It returns one latest device row, with per-point
+`rawValue`, `value`, `sampledAt`, `quality`, and `freshness`. Missing fields or
+values stay missing; sparse reports are not silently merged across timestamps.
+
+Divisors and sampling freshness must be reviewed in Java's `microgrid-agent.point-tables`
+configuration. Unconfirmed conversions return a null `value` and preserve `rawValue`;
+`[10]` in a name is a hint, not authorization to divide again. Neither SOC aliases,
+device roles nor fault bit positions are inferred. SQL queries return stored raw values
+and point-definition evidence. Explicit fields are required; calculations over metric
+columns require confirmed engineering values with divisor 1.

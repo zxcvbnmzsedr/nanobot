@@ -36,7 +36,7 @@ class _MicrogridReadTool(Tool):
 
     @property
     def parameters(self) -> dict[str, Any]:
-        return {
+        parameters = {
             "type": "object",
             "properties": {
                 "project_id": {
@@ -49,6 +49,18 @@ class _MicrogridReadTool(Tool):
             "required": ["project_id"],
             "additionalProperties": False,
         }
+        if self.resource == "metric-schema":
+            parameters["properties"]["search"] = {
+                "type": "string", "maxLength": 100,
+                "description": "Filter point definitions by identifier or name substring, e.g. SOC",
+            }
+        if self.resource == "metrics":
+            parameters["properties"]["identifiers"] = {
+                "type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": True,
+                "items": {"type": "string"},
+                "description": "Exact identifiers from the current schema; select relevant points",
+            }
+        return parameters
 
     @property
     def read_only(self) -> bool:
@@ -57,7 +69,23 @@ class _MicrogridReadTool(Tool):
     async def execute(self, project_id: str, **_kwargs: Any) -> str | ToolResult:
         try:
             context = MicrogridRequestContext.current()
-            result = await self.client.get(self.resource, context, project_id)
+            params: dict[str, Any] = {}
+            if self.resource == "metric-schema" and _kwargs.get("search") is not None:
+                search = _kwargs["search"]
+                if not isinstance(search, str) or len(search) > 100:
+                    return ToolResult.error("Point search must be a string, at most 100 characters")
+                params["search"] = search
+            if self.resource == "metrics" and _kwargs.get("identifiers") is not None:
+                identifiers = _kwargs["identifiers"]
+                if (
+                    not isinstance(identifiers, list) or not 1 <= len(identifiers) <= 50
+                    or any(not isinstance(value, str) or not value.strip() for value in identifiers)
+                ):
+                    return ToolResult.error("Select 1 to 50 identifiers from the latest schema")
+                params["identifiers"] = identifiers
+            result = await self.client.get(
+                self.resource, context, project_id, params=params or None,
+            )
             return json.dumps(result, ensure_ascii=False, default=str)
         except MicrogridContextError as exc:
             return ToolResult.error(f"Microgrid context error: {exc}")
@@ -116,10 +144,13 @@ class RealtimeMetricsTool(_MicrogridReadTool):
     _plugin_discoverable = True
     name = "get_realtime_metrics"
     description = (
-        "Get one authorized microgrid project's latest telemetry, including battery "
-        "SOC and power, grid/load/PV power, electrical measurements, temperatures, energy "
-        "totals, and grid-connected state when available. Use this before making any claim "
-        "about current operating conditions. Use list_microgrid_projects first."
+        "Read latest sampled points for one authorized project using the current point table. "
+        "Use list_microgrid_projects and get_device_metric_schema first; select relevant "
+        "identifiers to keep results small. Metrics include name, rawValue, value, unit, "
+        "sampledAt, quality and freshness. Null value is unavailable or unconfirmed, never zero. "
+        "Do not convert scaleHint yourself or decode status bits from name order. Stale or "
+        "freshness-unknown readings cannot establish current conditions. Do not infer "
+        "device roles or merge same-named points."
     )
     resource = "metrics"
 
@@ -143,10 +174,13 @@ class DeviceMetricSchemaTool(_MicrogridReadTool):
     _plugin_discoverable = True
     name = "get_device_metric_schema"
     description = (
-        "Get one authorized microgrid device's queryable metric column names and SQL "
-        "types. Call this before writing a device metric SQL query unless the relevant exact "
-        "column names were already returned in this conversation. SQL queries must use the "
-        "virtual table name device_metrics; never use a physical database table name."
+        "Get current point definitions, names, units, source rows, conversionStatus, divisors "
+        "and queryable flags for one authorized project. Optional search filters names or "
+        "identifiers. Refresh each turn, even if old definitions exist in conversation history. "
+        "Only query fields with queryable=true; missing, undefined and reserved points do not "
+        "provide business conclusions. scaleHint does not confirm a conversion. Multiple SOC "
+        "or total-power points belong to distinct sources until roles are confirmed. "
+        "SQL uses device_metrics, never a physical table name."
     )
     resource = "metric-schema"
 
@@ -161,7 +195,12 @@ class DeviceMetricSqlTool(_MicrogridReadTool):
         "Always query the virtual table device_metrics. The backend validates and binds the "
         "project and device, caps results at 200 rows, and rejects writes, joins, subqueries, "
         "parameters, unsafe functions, and other tables. Use get_device_metric_schema first to "
-        "discover exact column names. Include a time filter and ORDER BY ts for time-series data."
+        "discover exact identifiers. Select explicit columns; SELECT * and undefined fields "
+        "are forbidden. Results include point definitions and stored_raw values. Interpret "
+        "units only with confirmed conversion rules. Calculations require confirmed "
+        "engineering values (divisor=1); otherwise query "
+        "raw time series. Never SUM cumulative energy or treat a power target as measured power. "
+        "Include a time filter and ORDER BY ts for time-series data."
     )
     resource = "metric-query"
 
@@ -174,7 +213,7 @@ class DeviceMetricSqlTool(_MicrogridReadTool):
                     "type": "string",
                     "description": (
                         "One PostgreSQL SELECT statement over device_metrics, for example: "
-                        'SELECT ts, "battery_soc" FROM device_metrics '
+                        'SELECT ts, "1#6003" FROM device_metrics '
                         "WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '1 hour' "
                         "ORDER BY ts DESC LIMIT 100"
                     ),
