@@ -124,7 +124,10 @@ def resolve_config_env_vars(config: Config) -> Config:
     returns the same instance when no references are present.
     Raises ``ValueError`` if a referenced variable is not set.
     """
-    return _resolve_in_place(config)
+    resolved = _resolve_in_place(config)
+    # 环境变量解析完成后，重新应用白名单中的实际 CIDR。
+    _apply_ssrf_whitelist(resolved)
+    return resolved
 
 
 def resolve_env_refs(value: str) -> str:

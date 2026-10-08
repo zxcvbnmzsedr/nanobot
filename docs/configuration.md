@@ -1644,6 +1644,10 @@ nanobot uses a shared SSRF guard for built-in web fetches and HTTP/SSE MCP conne
 
 Keep whitelist entries as narrow as possible, such as a single host CIDR (`192.168.1.50/32`). The whitelist is global for the shared SSRF guard; it is not limited to one tool or one MCP server.
 
+白名单支持环境变量引用，例如 `"ssrfWhitelist": ["${MICROGRID_BACKEND_PRIMARY_CIDR}"]`。
+`load_config()` 保留配置模板；运行时调用 `resolve_config_env_vars()` 解析环境变量后，
+会重新应用实际 CIDR。未设置引用的环境变量时，解析会报错；空白名单会清除此前的例外。
+
 HTTP/SSE MCP connections use the same process-wide proxy environment behavior as `web_fetch`: proxied targets use the configured proxy, and URLs excluded by `NO_PROXY` remain DNS-pinned direct connections.
 
 > [!TIP]

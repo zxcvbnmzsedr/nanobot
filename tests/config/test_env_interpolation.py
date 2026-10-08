@@ -9,6 +9,7 @@ from nanobot.config.loader import (
     save_config,
 )
 from nanobot.config.schema import Config
+from nanobot.security import network
 
 
 class TestResolveEnvVars:
@@ -262,3 +263,51 @@ class TestResolveConfig:
 
         assert resolved.providers.groq.api_key == "resolved-key"
         assert resolved.providers.openai_codex.api_key == "secret"
+
+
+class TestResolveConfigSsrfWhitelist:
+    @pytest.fixture(autouse=True)
+    def isolate_whitelist(self, monkeypatch):
+        monkeypatch.setattr(network, "_allowed_networks", [])
+
+    @pytest.mark.parametrize("address", ["127.0.0.1", "172.19.0.2"])
+    def test_env_whitelist_allows_only_configured_backend(self, tmp_path, monkeypatch, address):
+        monkeypatch.setenv("TEST_BACKEND_CIDR", f"{address}/32")
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps({"tools": {"ssrfWhitelist": ["${TEST_BACKEND_CIDR}"]}}),
+            encoding="utf-8",
+        )
+
+        config = load_config(config_path)
+        assert config.tools.ssrf_whitelist == ["${TEST_BACKEND_CIDR}"]
+        assert not network.validate_url_target(f"http://{address}:48080")[0]
+
+        resolve_config_env_vars(config)
+
+        assert network.validate_url_target(f"http://{address}:48080")[0]
+        assert not network.validate_url_target("http://192.168.1.1")[0]
+        assert not network.validate_url_target("http://169.254.169.254")[0]
+
+    def test_resolving_empty_config_clears_previous_whitelist(self):
+        config = Config.model_validate({"tools": {"ssrfWhitelist": ["127.0.0.1/32"]}})
+        resolve_config_env_vars(config)
+        assert network.validate_url_target("http://127.0.0.1:48080")[0]
+
+        resolve_config_env_vars(Config())
+
+        assert not network.validate_url_target("http://127.0.0.1:48080")[0]
+
+    def test_missing_env_does_not_allow_backend(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TEST_BACKEND_CIDR", raising=False)
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps({"tools": {"ssrfWhitelist": ["${TEST_BACKEND_CIDR}"]}}),
+            encoding="utf-8",
+        )
+        config = load_config(config_path)
+
+        with pytest.raises(ValueError, match="TEST_BACKEND_CIDR"):
+            resolve_config_env_vars(config)
+
+        assert not network.validate_url_target("http://127.0.0.1:48080")[0]
